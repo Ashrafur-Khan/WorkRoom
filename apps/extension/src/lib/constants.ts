@@ -1,0 +1,1 @@
+export const ALARM_NAME = 'WORKROOM_TIMER';

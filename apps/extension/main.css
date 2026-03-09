@@ -1,0 +1,92 @@
+/* src/popup/popup.css */
+
+/* Force the popup to be a specific size */
+html, body {
+  width: 320px; /* Standard width for extensions */
+  height: fit-content;
+  min-height: 300px; /* Ensure enough vertical space */
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  padding: 16px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  background-color: #ffffff;
+  color: #333;
+}
+
+/* Utility for hiding views */
+.hidden {
+  display: none !important;
+}
+
+/* Inputs */
+textarea, input {
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  box-sizing: border-box; /* Keeps padding inside the width */
+  font-family: inherit;
+}
+
+/* Labels */
+label {
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 600;
+  font-size: 12px;
+}
+
+/* Buttons */
+button {
+  width: 100%;
+  padding: 10px;
+  background-color: #007AFF; /* System Blue */
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 8px;
+}
+
+button:disabled {
+  background-color: #ccc;
+  cursor: not-allowed;
+}
+
+button:hover:not(:disabled) {
+  background-color: #0062cc;
+}
+
+/* Text Styles */
+h1 {
+  font-size: 18px;
+  margin-top: 0;
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.info-text, .note-text {
+  font-size: 12px;
+  color: #666;
+  margin-bottom: 12px;
+}
+
+.session-header {
+  font-weight: bold;
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.display-text {
+  font-size: 13px;
+  margin: 4px 0;
+  padding: 8px;
+  background-color: #f5f5f5;
+  border-radius: 4px;
+}

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WorkRoom</title>
+    <script type="module" crossorigin src="/src/popup/index.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/constants.js">
+    <link rel="stylesheet" crossorigin href="/assets/popup.css">
+  </head>
+  <body>
+    <h1>WorkRoom</h1>
+
+    <div id="view-idle">
+      <label for="goal-input">Goal</label>
+      <textarea id="goal-input" rows="2" placeholder="Study for econ exam"></textarea>
+
+      <label for="duration-input">Duration (minutes)</label>
+      <input id="duration-input" type="number" value="25" min="1" max="180" />
+
+      <p class="info-text">Set your focus goal and start a session.</p>
+      <button id="start-btn" disabled>Start session</button>
+    </div>
+
+    <div id="view-running" class="hidden">
+      <p class="session-header">Current session</p>
+      
+      <p id="display-goal" class="display-text"></p>
+      <p id="display-endtime" class="display-text"></p>
+
+      <p class="note-text">Timers and stats are coming soon.</p>
+      <button id="stop-btn">End session</button>
+    </div>
+
+  </body>
+</html>

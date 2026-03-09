@@ -1,0 +1,30 @@
+{
+  "name": "workroom",
+  "version": "1.0.0",
+  "description": "Distraction killer",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev:extension": "vite --config apps/extension/vite.config.ts",
+    "build:extension": "vite build --config apps/extension/vite.config.ts && cp apps/extension/manifest.json apps/extension/dist/manifest.json && cp apps/extension/workicon.png apps/extension/dist/workicon.png"
+
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.272",
+    "@types/node": "^24.10.1",
+    "typescript": "^5.0.0",
+    "vite": "^5.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ashrafur-Khan/WorkRoom.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Ashrafur-Khan/WorkRoom/issues"
+  },
+  "homepage": "https://github.com/Ashrafur-Khan/WorkRoom#readme"
+}
