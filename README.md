@@ -1,5 +1,5 @@
 # WorkRoom
-Focus sessions that keep you on-task by coupling a lightweight goal/timer workflow with aggressive page blocking. WorkRoom began as a “distraction killer” prototype; this README explains how it works today and how to extend it—no React knowledge required.
+Focus sessions that keep you on-task by coupling a lightweight goal/timer workflow with aggressive page blocking.
 
 ## Overview
 - **Problem**: A user sets a goal, starts a timer, then drifts to social media before time is up.

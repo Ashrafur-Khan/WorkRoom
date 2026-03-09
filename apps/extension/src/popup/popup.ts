@@ -3,7 +3,7 @@ import './popup.css';
 import { ALARM_NAME } from '../lib/constants';
 
 // --- TYPES ---
-import { SessionState, Classification } from 'src/types';
+import { SessionState } from 'src/types';
 
 // --- STATE MANAGEMENT ---
 let state: SessionState = { isRunning: false };
@@ -109,6 +109,7 @@ function initialize() {
   elements.buttons.stop.addEventListener('click', () => {
     saveState({ isRunning: false });
     chrome.alarms.clear(ALARM_NAME);
+    chrome.runtime.sendMessage({ type: 'STOP_SESSION' });
   });
 
   // Load previous data
