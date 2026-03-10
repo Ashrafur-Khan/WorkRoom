@@ -131,6 +131,7 @@ async function runSecurityCheck(tabId: number, url: string, title: string): Prom
     appendDebugLog,
     classify: (targetUrl, targetTitle, goal, context) => classifyUrlWithLogging(targetUrl, targetTitle, goal, context),
     requestMlClassification,
+    scriptingApi: chrome.scripting,
     tabsApi: chrome.tabs,
   });
 }

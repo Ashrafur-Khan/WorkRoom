@@ -4,12 +4,17 @@ import type { DebugLogEntry, SessionState } from '../types';
 
 type ActionApi = Pick<typeof chrome.action, 'setBadgeText' | 'setBadgeBackgroundColor'>;
 type TabsApi = Pick<typeof chrome.tabs, 'sendMessage' | 'query'>;
+type ScriptingApi = Pick<typeof chrome.scripting, 'executeScript' | 'insertCSS'>;
+
+const CONTENT_SCRIPT_FILE = 'src/content/index.js';
+const CONTENT_STYLE_FILE = 'assets/content.css';
 
 export type SecurityCheckDependencies = {
   actionApi: ActionApi;
   appendDebugLog: (entry: DebugLogEntry) => Promise<void> | void;
   classify: typeof classifyUrl;
   requestMlClassification: typeof requestMlClassification;
+  scriptingApi: ScriptingApi;
   tabsApi: TabsApi;
 };
 
@@ -18,6 +23,7 @@ const defaultDependencies: SecurityCheckDependencies = {
   appendDebugLog: async () => undefined,
   classify: classifyUrl,
   requestMlClassification,
+  scriptingApi: chrome.scripting,
   tabsApi: chrome.tabs,
 };
 
@@ -33,9 +39,130 @@ function createDebugEntry(
   };
 }
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isMissingReceiverError(message: string): boolean {
+  return (
+    message.includes('Receiving end does not exist') ||
+    message.includes('Could not establish connection')
+  );
+}
+
+function isInjectableUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return ['http:', 'https:', 'file:'].includes(parsed.protocol);
+  } catch {
+    return false;
+  }
+}
+
+async function deliverBlockMessage(
+  dependencies: SecurityCheckDependencies,
+  tabId: number,
+  url: string,
+  goal: string,
+  requestId: string,
+): Promise<void> {
+  const message = {
+    type: 'BLOCK_PAGE' as const,
+    payload: { goal },
+  };
+
+  try {
+    await dependencies.tabsApi.sendMessage(tabId, message);
+    return;
+  } catch (error) {
+    const deliveryError = getErrorMessage(error);
+
+    if (!isMissingReceiverError(deliveryError)) {
+      await dependencies.appendDebugLog(
+        createDebugEntry('block-message-failed', {
+          error: deliveryError,
+          metadata: {
+            reason: 'send-message-failed',
+            url,
+          },
+          requestId,
+          tabId,
+        }),
+      );
+      console.error('[WorkRoom:bg] Could not send block message.', error);
+      return;
+    }
+
+    if (!isInjectableUrl(url)) {
+      await dependencies.appendDebugLog(
+        createDebugEntry('block-message-skipped', {
+          error: deliveryError,
+          metadata: {
+            reason: 'restricted-url',
+            url,
+          },
+          requestId,
+          tabId,
+        }),
+      );
+      console.warn('[WorkRoom:bg] Block message skipped because tab is not script-injectable.', {
+        requestId,
+        tabId,
+        url,
+      });
+      return;
+    }
+
+    try {
+      await dependencies.scriptingApi.insertCSS({
+        files: [CONTENT_STYLE_FILE],
+        target: { tabId },
+      });
+      await dependencies.scriptingApi.executeScript({
+        files: [CONTENT_SCRIPT_FILE],
+        target: { tabId },
+      });
+      await dependencies.tabsApi.sendMessage(tabId, message);
+
+      await dependencies.appendDebugLog(
+        createDebugEntry('block-message-recovered', {
+          metadata: {
+            strategy: 'reinject-content-script',
+            url,
+          },
+          requestId,
+          tabId,
+        }),
+      );
+    } catch (retryError) {
+      const retryMessage = getErrorMessage(retryError);
+
+      await dependencies.appendDebugLog(
+        createDebugEntry('block-message-failed', {
+          error: retryMessage,
+          metadata: {
+            reason: 'reinject-failed',
+            url,
+          },
+          requestId,
+          tabId,
+        }),
+      );
+      console.error('[WorkRoom:bg] Could not recover block message delivery.', {
+        deliveryError,
+        requestId,
+        retryError,
+        tabId,
+        url,
+      });
+    }
+  }
+}
+
 async function applyClassificationResult(
   dependencies: SecurityCheckDependencies,
   tabId: number,
+  url: string,
   classification: 'on-task' | 'off-task' | 'ambiguous',
   goal: string,
   requestId: string,
@@ -43,15 +170,7 @@ async function applyClassificationResult(
   if (classification === 'off-task') {
     dependencies.actionApi.setBadgeText({ text: 'BAD', tabId });
     dependencies.actionApi.setBadgeBackgroundColor({ color: '#FF0000', tabId });
-
-    try {
-      await dependencies.tabsApi.sendMessage(tabId, {
-        type: 'BLOCK_PAGE',
-        payload: { goal },
-      });
-    } catch (error) {
-      console.error('[WorkRoom:bg] Could not send block message.', error);
-    }
+    await deliverBlockMessage(dependencies, tabId, url, goal, requestId);
 
     await dependencies.appendDebugLog(
       createDebugEntry('classification-complete', {
@@ -109,7 +228,7 @@ export async function runSecurityCheckForState(
       requestMlClassification: dependencies.requestMlClassification,
     },
   );
-  await applyClassificationResult(dependencies, tabId, classification, state.goal, requestId);
+  await applyClassificationResult(dependencies, tabId, url, classification, state.goal, requestId);
 }
 
 export async function clearBadgesForAllTabs(
