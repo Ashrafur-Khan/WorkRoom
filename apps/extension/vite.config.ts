@@ -14,6 +14,7 @@ export default defineConfig({
       input: {
         // The UI (HTML acts as the entry, bringing its scripts with it)
         popup: resolve(__dirname, 'src/popup/popup.html'),
+        offscreen: resolve(__dirname, 'src/offscreen/offscreen.html'),
         // The Background Worker (Direct TS file)
         background: resolve(__dirname, 'src/background/index.ts'),
         content: resolve(__dirname, 'src/content/index.ts'),

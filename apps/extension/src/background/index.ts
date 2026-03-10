@@ -1,22 +1,32 @@
 import { createIdleState } from '../lib/session-utilities';
 import { ALARM_NAME } from '../lib/constants';
-import type { SessionState } from '../types';
+import { classifyUrl } from '../lib/classifier';
+import { closeOffscreenDocument, requestMlClassification } from '../lib/offscreen-client';
+import type { DebugLogEntry, SessionState } from '../types';
+import { appendDebugLog, getDebugLogs } from './debug-log';
 import { clearBadgesForAllTabs, resetClassifierSessionState, runSecurityCheckForState } from './security';
 
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name !== ALARM_NAME) {
-    return;
-  }
+function createDebugEntry(
+  status: string,
+  partial: Omit<DebugLogEntry, 'source' | 'status' | 'timestamp'> = {},
+): DebugLogEntry {
+  return {
+    ...partial,
+    source: 'bg',
+    status,
+    timestamp: Date.now(),
+  };
+}
 
-  console.log('[WorkRoom] Alarm fired! Ending session.');
+function log(status: string, metadata: Record<string, unknown> = {}): void {
+  console.log('[WorkRoom:bg]', status, metadata);
+}
 
-  const result = await chrome.storage.local.get('sessionState');
-  const state = result.sessionState as SessionState | undefined;
-  const goal = state && 'goal' in state ? state.goal : undefined;
-
+async function endSession(goal?: string): Promise<void> {
   await chrome.storage.local.set({ sessionState: createIdleState() });
   resetClassifierSessionState();
   await clearBadgesForAllTabs();
+  await closeOffscreenDocument(appendDebugLog);
 
   chrome.notifications.create(
     {
@@ -28,9 +38,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     },
     (notificationId) => {
       if (chrome.runtime.lastError) {
-        console.error('[WorkRoom] Notification failed:', chrome.runtime.lastError);
+        console.error('[WorkRoom:bg] Notification failed:', chrome.runtime.lastError);
       } else {
-        console.log('[WorkRoom] Notification sent. ID:', notificationId);
+        log('notification-sent', { notificationId });
       }
     },
   );
@@ -46,9 +56,23 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
         },
       });
     } catch {
-      console.log('[WorkRoom] Could not send in-page notification.');
+      log('session-complete-message-skipped');
     }
   }
+}
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== ALARM_NAME) {
+    return;
+  }
+
+  const result = await chrome.storage.local.get('sessionState');
+  const state = result.sessionState as SessionState | undefined;
+  const goal = state && 'goal' in state ? state.goal : undefined;
+
+  await appendDebugLog(createDebugEntry('session-alarm-fired'));
+  log('session-alarm-fired', { goal });
+  await endSession(goal);
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
@@ -65,23 +89,70 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'START_SESSION') {
     resetClassifierSessionState();
+    void appendDebugLog(createDebugEntry('session-started'));
     void sweepAllTabs();
+    return false;
   }
 
   if (message.type === 'STOP_SESSION') {
-    resetClassifierSessionState();
-    void clearBadgesForAllTabs();
+    void (async () => {
+      await appendDebugLog(createDebugEntry('session-stopped'));
+      await closeOffscreenDocument(appendDebugLog);
+      resetClassifierSessionState();
+      await clearBadgesForAllTabs();
+    })();
+    return false;
   }
+
+  if (message.type === 'ML_DEBUG_EVENT') {
+    void appendDebugLog(message.payload as DebugLogEntry);
+    return false;
+  }
+
+  if (message.type === 'GET_DEBUG_LOGS') {
+    void (async () => {
+      sendResponse(await getDebugLogs());
+    })();
+    return true;
+  }
+
+  return false;
 });
 
 async function runSecurityCheck(tabId: number, url: string, title: string): Promise<void> {
   const result = await chrome.storage.local.get('sessionState');
   const state = result.sessionState as SessionState | undefined;
 
-  await runSecurityCheckForState(tabId, url, title, state);
+  await runSecurityCheckForState(tabId, url, title, state, {
+    actionApi: chrome.action,
+    appendDebugLog,
+    classify: (targetUrl, targetTitle, goal, context) => classifyUrlWithLogging(targetUrl, targetTitle, goal, context),
+    requestMlClassification,
+    tabsApi: chrome.tabs,
+  });
+}
+
+async function classifyUrlWithLogging(
+  url: string,
+  title: string,
+  goal: string,
+  context: { requestId: string; tabId?: number },
+) {
+  const result = await classifyUrl(url, title, goal, context, {
+    appendDebugLog,
+    requestMlClassification,
+  });
+
+  log('classification-finished', {
+    requestId: context.requestId,
+    tabId: context.tabId,
+    url,
+  });
+
+  return result;
 }
 
 async function sweepAllTabs(): Promise<void> {

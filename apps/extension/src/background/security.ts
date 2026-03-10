@@ -1,26 +1,44 @@
+import { requestMlClassification } from '../lib/offscreen-client';
 import { classifyUrl, clearClassificationCaches } from '../lib/classifier';
-import type { Classification, SessionState } from '../types';
+import type { DebugLogEntry, SessionState } from '../types';
 
 type ActionApi = Pick<typeof chrome.action, 'setBadgeText' | 'setBadgeBackgroundColor'>;
 type TabsApi = Pick<typeof chrome.tabs, 'sendMessage' | 'query'>;
 
 export type SecurityCheckDependencies = {
   actionApi: ActionApi;
+  appendDebugLog: (entry: DebugLogEntry) => Promise<void> | void;
   classify: typeof classifyUrl;
+  requestMlClassification: typeof requestMlClassification;
   tabsApi: TabsApi;
 };
 
 const defaultDependencies: SecurityCheckDependencies = {
   actionApi: chrome.action,
+  appendDebugLog: async () => undefined,
   classify: classifyUrl,
+  requestMlClassification,
   tabsApi: chrome.tabs,
 };
+
+function createDebugEntry(
+  status: string,
+  partial: Omit<DebugLogEntry, 'source' | 'status' | 'timestamp'> = {},
+): DebugLogEntry {
+  return {
+    ...partial,
+    source: 'bg',
+    status,
+    timestamp: Date.now(),
+  };
+}
 
 async function applyClassificationResult(
   dependencies: SecurityCheckDependencies,
   tabId: number,
-  classification: Classification,
+  classification: 'on-task' | 'off-task' | 'ambiguous',
   goal: string,
+  requestId: string,
 ): Promise<void> {
   if (classification === 'off-task') {
     dependencies.actionApi.setBadgeText({ text: 'BAD', tabId });
@@ -32,19 +50,40 @@ async function applyClassificationResult(
         payload: { goal },
       });
     } catch (error) {
-      console.error('[WorkRoom] Could not send block message.', error);
+      console.error('[WorkRoom:bg] Could not send block message.', error);
     }
 
+    await dependencies.appendDebugLog(
+      createDebugEntry('classification-complete', {
+        metadata: { classification: 'off-task' },
+        requestId,
+        tabId,
+      }),
+    );
     return;
   }
 
   if (classification === 'on-task') {
     dependencies.actionApi.setBadgeText({ text: 'GOOD', tabId });
     dependencies.actionApi.setBadgeBackgroundColor({ color: '#00FF00', tabId });
+    await dependencies.appendDebugLog(
+      createDebugEntry('classification-complete', {
+        metadata: { classification: 'on-task' },
+        requestId,
+        tabId,
+      }),
+    );
     return;
   }
 
   dependencies.actionApi.setBadgeText({ text: '', tabId });
+  await dependencies.appendDebugLog(
+    createDebugEntry('classification-complete', {
+      metadata: { classification: 'ambiguous' },
+      requestId,
+      tabId,
+    }),
+  );
 }
 
 export async function runSecurityCheckForState(
@@ -59,8 +98,18 @@ export async function runSecurityCheckForState(
     return;
   }
 
-  const classification = await dependencies.classify(url, title, state.goal);
-  await applyClassificationResult(dependencies, tabId, classification, state.goal);
+  const requestId = `${tabId}:${Date.now()}`;
+  const classification = await dependencies.classify(
+    url,
+    title,
+    state.goal,
+    { requestId, tabId },
+    {
+      appendDebugLog: dependencies.appendDebugLog,
+      requestMlClassification: dependencies.requestMlClassification,
+    },
+  );
+  await applyClassificationResult(dependencies, tabId, classification, state.goal, requestId);
 }
 
 export async function clearBadgesForAllTabs(

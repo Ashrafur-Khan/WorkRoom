@@ -34,7 +34,11 @@ test('runSecurityCheckForState blocks off-task pages', async () => {
       startTime: Date.now(),
     },
     {
+      appendDebugLog: async () => undefined,
       classify: async () => 'off-task',
+      requestMlClassification: async () => {
+        throw new Error('requestMlClassification should not be called');
+      },
       actionApi: {
         setBadgeText(details) {
           calls.badgeText.push(details);
@@ -76,7 +80,11 @@ test('runSecurityCheckForState marks on-task pages as good', async () => {
       startTime: Date.now(),
     },
     {
+      appendDebugLog: async () => undefined,
       classify: async () => 'on-task',
+      requestMlClassification: async () => {
+        throw new Error('requestMlClassification should not be called');
+      },
       actionApi: {
         setBadgeText(details) {
           calls.badgeText.push(details);
@@ -114,7 +122,11 @@ test('runSecurityCheckForState clears badge for ambiguous pages', async () => {
       startTime: Date.now(),
     },
     {
+      appendDebugLog: async () => undefined,
       classify: async () => 'ambiguous',
+      requestMlClassification: async () => {
+        throw new Error('requestMlClassification should not be called');
+      },
       actionApi: {
         setBadgeText(details) {
           calls.push(details);
