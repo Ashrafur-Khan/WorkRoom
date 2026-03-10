@@ -1,7 +1,7 @@
 import * as use from '@tensorflow-models/universal-sentence-encoder';
 import * as tf from '@tensorflow/tfjs';
-import { setThreadsCount, setWasmPaths } from '@tensorflow/tfjs-backend-wasm';
-import '@tensorflow/tfjs-backend-wasm';
+import '@tensorflow/tfjs-backend-cpu';
+import '@tensorflow/tfjs-backend-webgl';
 
 import type { Classification } from '../types';
 import { buildPageContext, classifyCosineScore, cosineSimilarity, normalizeText } from './ml-helpers';
@@ -10,11 +10,19 @@ const MODEL_DIRECTORY = 'assets/models/use';
 const MODEL_URL = `${MODEL_DIRECTORY}/model.json`;
 const VOCAB_URL = `${MODEL_DIRECTORY}/vocab.json`;
 
-const WASM_PATHS = {
-  'tfjs-backend-wasm.wasm': 'assets/tfjs-backend-wasm.wasm',
-  'tfjs-backend-wasm-simd.wasm': 'assets/tfjs-backend-wasm-simd.wasm',
-  'tfjs-backend-wasm-threaded-simd.wasm': 'assets/tfjs-backend-wasm-threaded-simd.wasm',
-} as const;
+const BACKEND_PRIORITY = ['webgl', 'cpu'] as const;
+type SupportedBackend = (typeof BACKEND_PRIORITY)[number];
+type BackendDowngrade = {
+  from: SupportedBackend;
+  reason: string;
+};
+type ModelManagerTestOverrides = {
+  getBackend?: () => string;
+  loadModel?: typeof use.load;
+  ready?: typeof tf.ready;
+  setBackend?: typeof tf.setBackend;
+  verifyAssetExists?: typeof verifyAssetExists;
+};
 
 export type MlClassifyRequest = {
   goal: string;
@@ -62,10 +70,14 @@ export type MlDebugEvent = {
   timestamp: number;
 };
 
-let backendPromise: Promise<void> | null = null;
+let backendPromise: Promise<SupportedBackend> | null = null;
 let modelPromise: Promise<use.UniversalSentenceEncoder> | null = null;
 const goalEmbeddingCache = new Map<string, number[]>();
 const pageEmbeddingCache = new Map<string, number[]>();
+let selectedBackend: SupportedBackend | null = null;
+let lastAttemptedBackend: SupportedBackend | null = null;
+let backendDowngrade: BackendDowngrade | null = null;
+let testOverrides: ModelManagerTestOverrides = {};
 
 function toRuntimeUrl(path: string): string {
   return chrome.runtime.getURL(path);
@@ -91,47 +103,118 @@ async function verifyAssetExists(path: string): Promise<void> {
   }
 }
 
-async function ensureBackend(notifyDebug?: (event: MlDebugEvent) => void): Promise<void> {
+function getBackendName(): string {
+  return testOverrides.getBackend ? testOverrides.getBackend() : tf.getBackend();
+}
+
+async function setBackend(backend: SupportedBackend): Promise<boolean> {
+  return testOverrides.setBackend ? testOverrides.setBackend(backend) : tf.setBackend(backend);
+}
+
+async function waitForBackendReady(): Promise<void> {
+  return testOverrides.ready ? testOverrides.ready() : tf.ready();
+}
+
+async function ensureAssetExists(path: string): Promise<void> {
+  if (testOverrides.verifyAssetExists) {
+    await testOverrides.verifyAssetExists(path);
+    return;
+  }
+
+  await verifyAssetExists(path);
+}
+
+async function loadUseModel(options: {
+  modelUrl: string;
+  vocabUrl: string;
+}): Promise<use.UniversalSentenceEncoder> {
+  return testOverrides.loadModel ? testOverrides.loadModel(options) : use.load(options);
+}
+
+function getBackendMetadata(): Record<string, string> | undefined {
+  if (!backendDowngrade) {
+    return undefined;
+  }
+
+  return {
+    downgradedFrom: backendDowngrade.from,
+    downgradeReason: backendDowngrade.reason,
+  };
+}
+
+function getResolvedBackend(): string {
+  return (selectedBackend ?? getBackendName()) || lastAttemptedBackend || 'unknown';
+}
+
+async function tryBackend(
+  backend: SupportedBackend,
+  notifyDebug?: (event: MlDebugEvent) => void,
+): Promise<SupportedBackend> {
+  lastAttemptedBackend = backend;
+  notifyDebug?.(createDebugEvent('model-loading', { backend }));
+
+  const didSwitch = await setBackend(backend);
+
+  if (!didSwitch) {
+    throw new Error(`TensorFlow.js backend '${backend}' was not available.`);
+  }
+
+  await waitForBackendReady();
+  selectedBackend = backend;
+  return backend;
+}
+
+async function ensureBackend(notifyDebug?: (event: MlDebugEvent) => void): Promise<SupportedBackend> {
   if (!backendPromise) {
     backendPromise = (async () => {
-      notifyDebug?.(createDebugEvent('model-loading', { backend: 'wasm' }));
+      selectedBackend = null;
+      lastAttemptedBackend = null;
+      backendDowngrade = null;
+      let webglError: string | null = null;
 
-      tf.env().set('WASM_HAS_MULTITHREAD_SUPPORT', false);
-      setThreadsCount(1);
-      setWasmPaths(
-        Object.fromEntries(
-          Object.entries(WASM_PATHS).map(([fileName, path]) => [fileName, toRuntimeUrl(path)]),
-        ),
-      );
-
-      await Promise.all(Object.values(WASM_PATHS).map(verifyAssetExists));
-
-      const didSwitch = await tf.setBackend('wasm');
-
-      if (!didSwitch) {
-        throw new Error('TensorFlow.js WASM backend was not available.');
+      try {
+        return await tryBackend('webgl', notifyDebug);
+      } catch (error) {
+        webglError = error instanceof Error ? error.message : String(error);
       }
 
-      await tf.ready();
+      try {
+        const backend = await tryBackend('cpu', notifyDebug);
+        backendDowngrade = webglError ? { from: 'webgl', reason: webglError } : null;
+        return backend;
+      } catch (error) {
+        const cpuError = error instanceof Error ? error.message : String(error);
+        const attemptMessages = [
+          webglError ? `webgl: ${webglError}` : null,
+          `cpu: ${cpuError}`,
+        ].filter(Boolean);
+        throw new Error(`TensorFlow.js backend initialization failed. ${attemptMessages.join(' | ')}`);
+      }
     })().catch((error) => {
       backendPromise = null;
+      selectedBackend = null;
       throw error;
     });
   }
 
-  await backendPromise;
+  return backendPromise;
 }
 
 async function loadModel(notifyDebug?: (event: MlDebugEvent) => void): Promise<use.UniversalSentenceEncoder> {
-  await ensureBackend(notifyDebug);
-  await Promise.all([verifyAssetExists(MODEL_URL), verifyAssetExists(VOCAB_URL)]);
+  const backend = await ensureBackend(notifyDebug);
+  await Promise.all([ensureAssetExists(MODEL_URL), ensureAssetExists(VOCAB_URL)]);
 
-  const model = await use.load({
+  const model = await loadUseModel({
     modelUrl: toRuntimeUrl(MODEL_URL),
     vocabUrl: toRuntimeUrl(VOCAB_URL),
   });
 
-  notifyDebug?.(createDebugEvent('model-ready', { backend: tf.getBackend() }));
+  notifyDebug?.(
+    createDebugEvent('model-ready', {
+      backend,
+      metadata: getBackendMetadata(),
+    }),
+  );
   return model;
 }
 
@@ -189,7 +272,7 @@ export async function classifyWithModel(
 
     if (!normalizedGoal || !pageContext) {
       return {
-        backend: tf.getBackend() || 'unknown',
+        backend: getResolvedBackend(),
         cacheHit: false,
         error: 'Missing goal or page context for ML classification.',
         modelState: 'fallback',
@@ -217,16 +300,17 @@ export async function classifyWithModel(
     const classification = classifyCosineScore(score);
 
     notifyDebug?.(
-      createDebugEvent('classification-complete', {
-        backend: tf.getBackend(),
-        cacheHit: goalResult.cacheHit && pageResult.cacheHit,
-        requestId: request.requestId,
-        score,
-      }),
+        createDebugEvent('classification-complete', {
+          backend: getResolvedBackend(),
+          cacheHit: goalResult.cacheHit && pageResult.cacheHit,
+          metadata: getBackendMetadata(),
+          requestId: request.requestId,
+          score,
+        }),
     );
 
     return {
-      backend: tf.getBackend(),
+      backend: getResolvedBackend(),
       cacheHit: goalResult.cacheHit && pageResult.cacheHit,
       classification,
       modelState: 'ready',
@@ -237,14 +321,14 @@ export async function classifyWithModel(
 
     notifyDebug?.(
       createDebugEvent('classification-fallback', {
-        backend: tf.getBackend() || 'unknown',
+        backend: getResolvedBackend(),
         error: message,
         requestId: request.requestId,
       }),
     );
 
     return {
-      backend: tf.getBackend() || 'unknown',
+      backend: getResolvedBackend(),
       cacheHit: false,
       error: message,
       modelState: 'fallback',
@@ -256,8 +340,16 @@ export async function classifyWithModel(
 export function resetModelManagerForTesting(): void {
   backendPromise = null;
   modelPromise = null;
+  selectedBackend = null;
+  lastAttemptedBackend = null;
+  backendDowngrade = null;
+  testOverrides = {};
   goalEmbeddingCache.clear();
   pageEmbeddingCache.clear();
+}
+
+export function configureModelManagerForTesting(overrides: ModelManagerTestOverrides): void {
+  testOverrides = overrides;
 }
 
 export function clearModelCaches(): void {
