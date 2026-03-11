@@ -1,8 +1,10 @@
-import type { Classification } from '../types';
-import { buildPageContext, classifyCosineScore, cosineSimilarity, normalizeText } from './ml-helpers';
+import type { Classification, DebugLogEntry } from '../types';
+import { normalizeText } from './ml-helpers';
+import { requestMlClassification } from './offscreen-client';
 
-type EmbeddingProvider = {
-  embedTexts(texts: string[]): Promise<number[][]>;
+type MlClassifierDependencies = {
+  appendDebugLog: (entry: DebugLogEntry) => Promise<void> | void;
+  requestMlClassification: typeof requestMlClassification;
 };
 
 const USER_BLOCKLIST: string[] = [];
@@ -13,10 +15,8 @@ const DISTRACTIONS = [
   'facebook.com',
   'twitter.com',
   'tiktok.com',
-  'reddit.com',
   'netflix.com',
   'twitch.tv',
-  'youtube.com',
 ];
 
 const PRODUCTIVE = [
@@ -30,20 +30,22 @@ const PRODUCTIVE = [
   'docs.google.com',
 ];
 
-const goalEmbeddingCache = new Map<string, number[]>();
-const pageEmbeddingCache = new Map<string, number[]>();
-
-let modelManagerPromise: Promise<typeof import('./model-manager')> | null = null;
-let embeddingProvider: EmbeddingProvider = {
-  async embedTexts(texts: string[]) {
-    if (!modelManagerPromise) {
-      modelManagerPromise = import('./model-manager');
-    }
-
-    const { embedTexts } = await modelManagerPromise;
-    return embedTexts(texts);
-  },
+const defaultDependencies: MlClassifierDependencies = {
+  appendDebugLog: async () => undefined,
+  requestMlClassification,
 };
+
+function createDebugEntry(
+  status: string,
+  partial: Omit<DebugLogEntry, 'source' | 'status' | 'timestamp'> = {},
+): DebugLogEntry {
+  return {
+    ...partial,
+    source: 'bg',
+    status,
+    timestamp: Date.now(),
+  };
+}
 
 function resolveDomain(url: string): string {
   return new URL(url).hostname.toLowerCase();
@@ -59,23 +61,6 @@ function getBlocklistOverride(domain: string): Classification | null {
   }
 
   return null;
-}
-
-async function getCachedEmbedding(cache: Map<string, number[]>, key: string, text: string): Promise<number[]> {
-  const cached = cache.get(key);
-
-  if (cached) {
-    return cached;
-  }
-
-  const [embedding] = await embeddingProvider.embedTexts([text]);
-
-  if (!embedding) {
-    throw new Error(`No embedding returned for key: ${key}`);
-  }
-
-  cache.set(key, embedding);
-  return embedding;
 }
 
 function buildFallbackGoalKeywords(goal: string): string[] {
@@ -111,7 +96,13 @@ export function heuristicClassifyUrl(url: string, title: string, goal: string): 
   }
 }
 
-export async function classifyUrl(url: string, title: string, goal: string): Promise<Classification> {
+export async function classifyUrl(
+  url: string,
+  title: string,
+  goal: string,
+  context: { requestId: string; tabId?: number },
+  dependencies: MlClassifierDependencies = defaultDependencies,
+): Promise<Classification> {
   try {
     const domain = resolveDomain(url);
     const override = getBlocklistOverride(domain);
@@ -120,40 +111,63 @@ export async function classifyUrl(url: string, title: string, goal: string): Pro
       return override;
     }
 
-    const normalizedGoal = normalizeText(goal);
-    const pageContext = buildPageContext(url, title);
+    const mlResult = await dependencies.requestMlClassification(
+      {
+        goal,
+        requestId: context.requestId,
+        tabId: context.tabId,
+        title,
+        url,
+      },
+      dependencies.appendDebugLog,
+    );
 
-    if (!normalizedGoal || !pageContext) {
+    if (mlResult.modelState === 'fallback') {
+      await dependencies.appendDebugLog(
+        createDebugEntry('classification-fallback', {
+          backend: mlResult.backend,
+          error: mlResult.error,
+          requestId: context.requestId,
+          tabId: context.tabId,
+        }),
+      );
+
+      console.warn('[WorkRoom:bg] ML classification fell back to heuristic classifier.', {
+        backend: mlResult.backend,
+        error: mlResult.error,
+        requestId: context.requestId,
+        tabId: context.tabId,
+      });
+
       return heuristicClassifyUrl(url, title, goal);
     }
 
-    const goalEmbedding = await getCachedEmbedding(goalEmbeddingCache, normalizedGoal, normalizedGoal);
-    const pageCacheKey = `${domain}|${pageContext}`;
-    const pageEmbedding = await getCachedEmbedding(pageEmbeddingCache, pageCacheKey, pageContext);
-
-    return classifyCosineScore(cosineSimilarity(goalEmbedding, pageEmbedding));
+    return mlResult.classification;
   } catch (error) {
-    console.warn('[WorkRoom] Falling back to heuristic classifier.', error);
+    const message = error instanceof Error ? error.message : String(error);
+
+    await dependencies.appendDebugLog(
+      createDebugEntry('classification-fallback', {
+        error: message,
+        requestId: context.requestId,
+        tabId: context.tabId,
+      }),
+    );
+
+    console.warn('[WorkRoom:bg] Falling back to heuristic classifier.', {
+      error: message,
+      requestId: context.requestId,
+      tabId: context.tabId,
+    });
+
     return heuristicClassifyUrl(url, title, goal);
   }
 }
 
 export function clearClassificationCaches(): void {
-  goalEmbeddingCache.clear();
-  pageEmbeddingCache.clear();
+  // Background no longer owns ML caches. This remains as a no-op compatibility shim.
 }
 
-export function configureEmbeddingProviderForTesting(provider: EmbeddingProvider | null): void {
-  modelManagerPromise = null;
-  embeddingProvider = provider ?? {
-    async embedTexts(texts: string[]) {
-      if (!modelManagerPromise) {
-        modelManagerPromise = import('./model-manager');
-      }
-
-      const { embedTexts } = await modelManagerPromise;
-      return embedTexts(texts);
-    },
-  };
-  clearClassificationCaches();
+export function configureEmbeddingProviderForTesting(): void {
+  // The classifier now talks to the offscreen runtime. Tests should inject requestMlClassification instead.
 }
