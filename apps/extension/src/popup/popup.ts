@@ -1,6 +1,7 @@
 // apps/extension/src/popup/popup.ts
 import './popup.css';
 import { ALARM_NAME } from '../lib/constants';
+import { createRunningState } from '../lib/session-utilities';
 
 // --- TYPES ---
 import { SessionState } from 'src/types';
@@ -93,12 +94,7 @@ function initialize() {
     const duration = Number(elements.inputs.duration?.value);
 
     if (goal && duration) {
-      saveState({
-        isRunning: true,
-        goal,
-        durationMinutes: duration,
-        startTime: Date.now(),
-      });
+      saveState(createRunningState(goal, duration));
       chrome.alarms.create(ALARM_NAME, { delayInMinutes: duration });
       //Tell Background to Scan ALL tabs immediately
       chrome.runtime.sendMessage({ type: 'START_SESSION' });
