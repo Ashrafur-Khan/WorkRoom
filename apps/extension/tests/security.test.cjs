@@ -8,6 +8,11 @@ global.chrome = {
     setBadgeText: noop,
     setBadgeBackgroundColor: noop,
   },
+  storage: {
+    local: {
+      set: async () => undefined,
+    },
+  },
   scripting: {
     executeScript: async () => undefined,
     insertCSS: async () => undefined,
@@ -22,8 +27,10 @@ const { runSecurityCheckForState } = require('../.test-build/background/security
 
 function createRunningState() {
   return {
+    allowedDomains: [],
     isRunning: true,
     goal: 'Ship WorkRoom',
+    snoozedDomains: {},
     durationMinutes: 25,
     startTime: Date.now(),
   };
@@ -74,6 +81,11 @@ test('runSecurityCheckForState blocks off-task pages', async () => {
         },
         async insertCSS(details) {
           calls.insertCSS.push(details);
+        },
+      },
+      storageApi: {
+        async set() {
+          throw new Error('storageApi.set should not be called');
         },
       },
     },
@@ -140,6 +152,11 @@ test('runSecurityCheckForState reinjects the content script when an off-task tab
           calls.insertCSS.push(details);
         },
       },
+      storageApi: {
+        async set() {
+          throw new Error('storageApi.set should not be called');
+        },
+      },
     },
   );
 
@@ -201,6 +218,11 @@ test('runSecurityCheckForState does not inject scripts into restricted off-task 
           calls.insertCSS.push(details);
         },
       },
+      storageApi: {
+        async set() {
+          throw new Error('storageApi.set should not be called');
+        },
+      },
     },
   );
 
@@ -255,6 +277,11 @@ test('runSecurityCheckForState marks on-task pages as good', async () => {
           throw new Error('insertCSS should not be called');
         },
       },
+      storageApi: {
+        async set() {
+          throw new Error('storageApi.set should not be called');
+        },
+      },
     },
   );
 
@@ -300,8 +327,217 @@ test('runSecurityCheckForState clears badge for ambiguous pages', async () => {
           throw new Error('insertCSS should not be called');
         },
       },
+      storageApi: {
+        async set() {
+          throw new Error('storageApi.set should not be called');
+        },
+      },
     },
   );
 
   assert.deepEqual(calls, [{ text: '', tabId: 3 }]);
+});
+
+test('runSecurityCheckForState treats allowed domains as on-task overrides', async () => {
+  const calls = {
+    badgeColor: [],
+    badgeText: [],
+    classifyCalls: 0,
+    debugEntries: [],
+  };
+
+  await runSecurityCheckForState(
+    17,
+    'https://docs.example.com/page',
+    'Example',
+    {
+      ...createRunningState(),
+      allowedDomains: ['docs.example.com'],
+    },
+    {
+      appendDebugLog: async (entry) => {
+        calls.debugEntries.push(entry);
+      },
+      classify: async () => {
+        calls.classifyCalls += 1;
+        return 'off-task';
+      },
+      requestMlClassification: async () => {
+        throw new Error('requestMlClassification should not be called');
+      },
+      actionApi: {
+        setBadgeText(details) {
+          calls.badgeText.push(details);
+        },
+        setBadgeBackgroundColor(details) {
+          calls.badgeColor.push(details);
+        },
+      },
+      tabsApi: {
+        async sendMessage() {
+          throw new Error('sendMessage should not be called');
+        },
+        async query() {
+          return [];
+        },
+      },
+      scriptingApi: {
+        async executeScript() {
+          throw new Error('executeScript should not be called');
+        },
+        async insertCSS() {
+          throw new Error('insertCSS should not be called');
+        },
+      },
+      storageApi: {
+        async set() {
+          throw new Error('storageApi.set should not be called');
+        },
+      },
+    },
+  );
+
+  assert.equal(calls.classifyCalls, 0);
+  assert.deepEqual(calls.badgeText, [{ text: 'GOOD', tabId: 17 }]);
+  assert.deepEqual(calls.badgeColor, [{ color: '#00FF00', tabId: 17 }]);
+  assert.equal(calls.debugEntries.at(-1)?.status, 'override-applied');
+  assert.equal(calls.debugEntries.at(-1)?.metadata?.reason, 'user-allowed-domain');
+});
+
+test('runSecurityCheckForState treats active snoozes as on-task overrides', async () => {
+  const calls = {
+    badgeColor: [],
+    badgeText: [],
+    classifyCalls: 0,
+    debugEntries: [],
+  };
+
+  await runSecurityCheckForState(
+    18,
+    'https://docs.example.com/page',
+    'Example',
+    {
+      ...createRunningState(),
+      snoozedDomains: {
+        'docs.example.com': Date.now() + 60_000,
+      },
+    },
+    {
+      appendDebugLog: async (entry) => {
+        calls.debugEntries.push(entry);
+      },
+      classify: async () => {
+        calls.classifyCalls += 1;
+        return 'off-task';
+      },
+      requestMlClassification: async () => {
+        throw new Error('requestMlClassification should not be called');
+      },
+      actionApi: {
+        setBadgeText(details) {
+          calls.badgeText.push(details);
+        },
+        setBadgeBackgroundColor(details) {
+          calls.badgeColor.push(details);
+        },
+      },
+      tabsApi: {
+        async sendMessage() {
+          throw new Error('sendMessage should not be called');
+        },
+        async query() {
+          return [];
+        },
+      },
+      scriptingApi: {
+        async executeScript() {
+          throw new Error('executeScript should not be called');
+        },
+        async insertCSS() {
+          throw new Error('insertCSS should not be called');
+        },
+      },
+      storageApi: {
+        async set() {
+          throw new Error('storageApi.set should not be called');
+        },
+      },
+    },
+  );
+
+  assert.equal(calls.classifyCalls, 0);
+  assert.deepEqual(calls.badgeText, [{ text: 'GOOD', tabId: 18 }]);
+  assert.deepEqual(calls.badgeColor, [{ color: '#00FF00', tabId: 18 }]);
+  assert.equal(calls.debugEntries.at(-1)?.status, 'override-applied');
+  assert.equal(calls.debugEntries.at(-1)?.metadata?.reason, 'domain-snoozed');
+});
+
+test('runSecurityCheckForState expires snoozes and falls back to classification', async () => {
+  const calls = {
+    badgeColor: [],
+    badgeText: [],
+    classifyCalls: 0,
+    debugEntries: [],
+    storageSet: [],
+  };
+
+  await runSecurityCheckForState(
+    19,
+    'https://docs.example.com/page',
+    'Example',
+    {
+      ...createRunningState(),
+      snoozedDomains: {
+        'docs.example.com': Date.now() - 1_000,
+      },
+    },
+    {
+      appendDebugLog: async (entry) => {
+        calls.debugEntries.push(entry);
+      },
+      classify: async () => {
+        calls.classifyCalls += 1;
+        return 'on-task';
+      },
+      requestMlClassification: async () => {
+        throw new Error('requestMlClassification should not be called');
+      },
+      actionApi: {
+        setBadgeText(details) {
+          calls.badgeText.push(details);
+        },
+        setBadgeBackgroundColor(details) {
+          calls.badgeColor.push(details);
+        },
+      },
+      tabsApi: {
+        async sendMessage() {
+          throw new Error('sendMessage should not be called');
+        },
+        async query() {
+          return [];
+        },
+      },
+      scriptingApi: {
+        async executeScript() {
+          throw new Error('executeScript should not be called');
+        },
+        async insertCSS() {
+          throw new Error('insertCSS should not be called');
+        },
+      },
+      storageApi: {
+        async set(details) {
+          calls.storageSet.push(details);
+        },
+      },
+    },
+  );
+
+  assert.equal(calls.classifyCalls, 1);
+  assert.equal(calls.storageSet.length, 1);
+  assert.deepEqual(calls.badgeText, [{ text: 'GOOD', tabId: 19 }]);
+  assert.deepEqual(calls.badgeColor, [{ color: '#00FF00', tabId: 19 }]);
+  assert.equal(calls.debugEntries[0]?.status, 'snooze-expired');
+  assert.equal(calls.debugEntries.at(-1)?.status, 'classification-complete');
 });

@@ -1,10 +1,12 @@
+import { getDomainFromUrl } from '../lib/session-utilities';
 import { requestMlClassification } from '../lib/offscreen-client';
 import { classifyUrl, clearClassificationCaches } from '../lib/classifier';
-import type { DebugLogEntry, SessionState } from '../types';
+import type { DebugLogEntry, RunningSessionState, SessionState } from '../types';
 
 type ActionApi = Pick<typeof chrome.action, 'setBadgeText' | 'setBadgeBackgroundColor'>;
 type TabsApi = Pick<typeof chrome.tabs, 'sendMessage' | 'query'>;
 type ScriptingApi = Pick<typeof chrome.scripting, 'executeScript' | 'insertCSS'>;
+type StorageApi = Pick<typeof chrome.storage.local, 'set'>;
 
 const CONTENT_SCRIPT_FILE = 'src/content/index.js';
 const CONTENT_STYLE_FILE = 'assets/content.css';
@@ -15,6 +17,7 @@ export type SecurityCheckDependencies = {
   classify: typeof classifyUrl;
   requestMlClassification: typeof requestMlClassification;
   scriptingApi: ScriptingApi;
+  storageApi: StorageApi;
   tabsApi: TabsApi;
 };
 
@@ -24,6 +27,7 @@ const defaultDependencies: SecurityCheckDependencies = {
   classify: classifyUrl,
   requestMlClassification,
   scriptingApi: chrome.scripting,
+  storageApi: chrome.storage.local,
   tabsApi: chrome.tabs,
 };
 
@@ -205,6 +209,76 @@ async function applyClassificationResult(
   );
 }
 
+async function applyOverrideResult(
+  dependencies: SecurityCheckDependencies,
+  tabId: number,
+  requestId: string,
+  metadata: Record<string, string | number | boolean | null>,
+): Promise<void> {
+  dependencies.actionApi.setBadgeText({ text: 'GOOD', tabId });
+  dependencies.actionApi.setBadgeBackgroundColor({ color: '#00FF00', tabId });
+  await dependencies.appendDebugLog(
+    createDebugEntry('override-applied', {
+      metadata,
+      requestId,
+      tabId,
+    }),
+  );
+}
+
+async function resolveSessionOverride(
+  dependencies: SecurityCheckDependencies,
+  tabId: number,
+  url: string,
+  requestId: string,
+  state: RunningSessionState,
+): Promise<boolean> {
+  const domain = getDomainFromUrl(url);
+
+  if (!domain) {
+    return false;
+  }
+
+  if (state.allowedDomains.includes(domain)) {
+    await applyOverrideResult(dependencies, tabId, requestId, {
+      domain,
+      reason: 'user-allowed-domain',
+      scope: 'session',
+    });
+    return true;
+  }
+
+  const snoozeExpiresAt = state.snoozedDomains[domain];
+
+  if (!snoozeExpiresAt) {
+    return false;
+  }
+
+  if (snoozeExpiresAt <= Date.now()) {
+    delete state.snoozedDomains[domain];
+    await dependencies.storageApi.set({ sessionState: state });
+    await dependencies.appendDebugLog(
+      createDebugEntry('snooze-expired', {
+        metadata: {
+          domain,
+          expiredAt: snoozeExpiresAt,
+        },
+        requestId,
+        tabId,
+      }),
+    );
+    return false;
+  }
+
+  await applyOverrideResult(dependencies, tabId, requestId, {
+    domain,
+    expiresAt: snoozeExpiresAt,
+    reason: 'domain-snoozed',
+    scope: 'temporary',
+  });
+  return true;
+}
+
 export async function runSecurityCheckForState(
   tabId: number,
   url: string,
@@ -218,6 +292,11 @@ export async function runSecurityCheckForState(
   }
 
   const requestId = `${tabId}:${Date.now()}`;
+
+  if (await resolveSessionOverride(dependencies, tabId, url, requestId, state)) {
+    return;
+  }
+
   const classification = await dependencies.classify(
     url,
     title,

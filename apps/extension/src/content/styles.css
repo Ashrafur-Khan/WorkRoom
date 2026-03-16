@@ -39,6 +39,8 @@
   align-items: center;
   font-family: -apple-system, sans-serif;
   color: #333;
+  padding: 24px;
+  box-sizing: border-box;
 }
 
 .workroom-overlay h1 {
@@ -56,6 +58,13 @@
   line-height: 1.5;
 }
 
+.workroom-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(100%, 360px);
+}
+
 .workroom-btn-back {
   padding: 12px 24px;
   background-color: #333;
@@ -69,4 +78,53 @@
 
 .workroom-btn-back:hover {
   background-color: #38A169;
+}
+
+.workroom-btn-secondary,
+.workroom-btn-snooze {
+  padding: 12px 24px;
+  border: none;
+  border-radius: 6px;
+  font-size: 16px;
+  cursor: pointer;
+  transition: background 0.2s ease-in-out;
+}
+
+.workroom-btn-secondary {
+  background-color: #f0f4f8;
+  color: #1f2933;
+}
+
+.workroom-btn-secondary:hover {
+  background-color: #d9e2ec;
+}
+
+.workroom-snooze-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+}
+
+.workroom-snooze-label {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #52606d;
+}
+
+.workroom-snooze-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.workroom-btn-snooze {
+  background-color: #e53935;
+  color: #fff;
+}
+
+.workroom-btn-snooze:hover {
+  background-color: #c62828;
 }

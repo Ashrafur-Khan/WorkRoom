@@ -1,8 +1,8 @@
-import { createIdleState } from '../lib/session-utilities';
+import { createIdleState, getDomainFromUrl, normalizeSessionState } from '../lib/session-utilities';
 import { ALARM_NAME } from '../lib/constants';
 import { classifyUrl } from '../lib/classifier';
 import { closeOffscreenDocument, requestMlClassification } from '../lib/offscreen-client';
-import type { DebugLogEntry, SessionState } from '../types';
+import type { DebugLogEntry, RunningSessionState, SessionState } from '../types';
 import { appendDebugLog, getDebugLogs } from './debug-log';
 import { clearBadgesForAllTabs, resetClassifierSessionState, runSecurityCheckForState } from './security';
 
@@ -20,6 +20,63 @@ function createDebugEntry(
 
 function log(status: string, metadata: Record<string, unknown> = {}): void {
   console.log('[WorkRoom:bg]', status, metadata);
+}
+
+async function getNormalizedSessionState(): Promise<SessionState> {
+  const result = await chrome.storage.local.get('sessionState');
+  const normalized = normalizeSessionState(result.sessionState as SessionState | undefined);
+
+  if (normalized.changed) {
+    await chrome.storage.local.set({ sessionState: normalized.state });
+  }
+
+  return normalized.state;
+}
+
+async function refreshTabsForDomain(domain: string): Promise<void> {
+  const tabs = await chrome.tabs.query({});
+
+  await Promise.all(
+    tabs.map(async (tab) => {
+      if (!tab.id || !tab.url || getDomainFromUrl(tab.url) !== domain) {
+        return;
+      }
+
+      try {
+        await chrome.tabs.sendMessage(tab.id, { type: 'UNBLOCK_PAGE' });
+      } catch {
+        log('unblock-message-skipped', { domain, tabId: tab.id });
+      }
+
+      if (tab.title) {
+        await runSecurityCheck(tab.id, tab.url, tab.title);
+      }
+    }),
+  );
+}
+
+async function updateRunningSessionState(
+  mutate: (
+    state: RunningSessionState,
+  ) => { debugStatus: string; metadata: Record<string, string | number | boolean | null> } | null,
+): Promise<{ metadata?: Record<string, string | number | boolean | null>; ok: boolean }> {
+  const currentState = await getNormalizedSessionState();
+
+  if (!currentState.isRunning) {
+    return { ok: false };
+  }
+
+  const mutation = mutate(currentState);
+
+  if (!mutation) {
+    return { ok: false };
+  }
+
+  await chrome.storage.local.set({ sessionState: currentState });
+  await appendDebugLog(createDebugEntry(mutation.debugStatus, { metadata: mutation.metadata }));
+  log(mutation.debugStatus, mutation.metadata);
+
+  return { metadata: mutation.metadata, ok: true };
 }
 
 async function endSession(goal?: string): Promise<void> {
@@ -66,8 +123,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     return;
   }
 
-  const result = await chrome.storage.local.get('sessionState');
-  const state = result.sessionState as SessionState | undefined;
+  const state = await getNormalizedSessionState();
   const goal = state && 'goal' in state ? state.goal : undefined;
 
   await appendDebugLog(createDebugEntry('session-alarm-fired'));
@@ -89,7 +145,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'START_SESSION') {
     resetClassifierSessionState();
     void appendDebugLog(createDebugEntry('session-started'));
@@ -112,6 +168,66 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
 
+  if (message.type === 'ALLOW_DOMAIN_FOR_SESSION' || message.type === 'SNOOZE_DOMAIN') {
+    void (async () => {
+      const senderTabId = sender.tab?.id;
+      const senderUrl = sender.tab?.url;
+
+      if (!senderTabId || !senderUrl) {
+        sendResponse({ ok: false });
+        return;
+      }
+
+      const domain = getDomainFromUrl(senderUrl);
+
+      if (!domain) {
+        sendResponse({ ok: false });
+        return;
+      }
+
+      const result =
+        message.type === 'ALLOW_DOMAIN_FOR_SESSION'
+          ? await updateRunningSessionState((state) => {
+              if (state.allowedDomains.includes(domain)) {
+                return {
+                  debugStatus: 'user-marked-allowed-domain',
+                  metadata: { domain, scope: 'session', wasDuplicate: true },
+                };
+              }
+
+              state.allowedDomains.push(domain);
+              delete state.snoozedDomains[domain];
+              return {
+                debugStatus: 'user-marked-allowed-domain',
+                metadata: { domain, scope: 'session', wasDuplicate: false },
+              };
+            })
+          : await updateRunningSessionState((state) => {
+              const durationMinutes = Number(message.payload?.durationMinutes);
+
+              if (!Number.isFinite(durationMinutes) || durationMinutes <= 0) {
+                return null;
+              }
+
+              state.snoozedDomains[domain] = Date.now() + durationMinutes * 60 * 1000;
+              return {
+                debugStatus: 'domain-snoozed',
+                metadata: { domain, durationMinutes, scope: 'domain' },
+              };
+            });
+
+      if (!result.ok) {
+        sendResponse({ ok: false });
+        return;
+      }
+
+      await refreshTabsForDomain(domain);
+      sendResponse({ metadata: result.metadata, ok: true });
+    })();
+
+    return true;
+  }
+
   if (message.type === 'GET_DEBUG_LOGS') {
     void (async () => {
       sendResponse(await getDebugLogs());
@@ -123,8 +239,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 async function runSecurityCheck(tabId: number, url: string, title: string): Promise<void> {
-  const result = await chrome.storage.local.get('sessionState');
-  const state = result.sessionState as SessionState | undefined;
+  const state = await getNormalizedSessionState();
 
   await runSecurityCheckForState(tabId, url, title, state, {
     actionApi: chrome.action,
@@ -132,6 +247,7 @@ async function runSecurityCheck(tabId: number, url: string, title: string): Prom
     classify: (targetUrl, targetTitle, goal, context) => classifyUrlWithLogging(targetUrl, targetTitle, goal, context),
     requestMlClassification,
     scriptingApi: chrome.scripting,
+    storageApi: chrome.storage.local,
     tabsApi: chrome.tabs,
   });
 }
