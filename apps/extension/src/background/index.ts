@@ -2,7 +2,7 @@ import { createIdleState, getDomainFromUrl, normalizeSessionState } from '../lib
 import { ALARM_NAME } from '../lib/constants';
 import { classifyUrl } from '../lib/classifier';
 import { closeOffscreenDocument, requestMlClassification } from '../lib/offscreen-client';
-import type { DebugLogEntry, RunningSessionState, SessionState } from '../types';
+import type { DebugLogEntry, PageSignals, RunningSessionState, SessionState } from '../types';
 import { appendDebugLog, getDebugLogs } from './debug-log';
 import { clearBadgesForAllTabs, resetClassifierSessionState, runSecurityCheckForState } from './security';
 
@@ -256,7 +256,7 @@ async function classifyUrlWithLogging(
   url: string,
   title: string,
   goal: string,
-  context: { requestId: string; tabId?: number },
+  context: { pageSignals?: PageSignals; requestId: string; tabId?: number },
 ) {
   const result = await classifyUrl(url, title, goal, context, {
     appendDebugLog,

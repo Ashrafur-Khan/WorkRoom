@@ -18,6 +18,7 @@ global.chrome = {
     insertCSS: async () => undefined,
   },
   tabs: {
+    get: async (tabId) => ({ id: tabId, url: 'https://example.com' }),
     query: async () => [],
     sendMessage: async () => undefined,
   },
@@ -55,7 +56,7 @@ test('runSecurityCheckForState blocks off-task pages', async () => {
       appendDebugLog: async (entry) => {
         calls.debugEntries.push(entry);
       },
-      classify: async () => 'off-task',
+      classify: async () => ({ classification: 'off-task', score: 0.1, source: 'ml', usedPageSignals: false }),
       requestMlClassification: async () => {
         throw new Error('requestMlClassification should not be called');
       },
@@ -68,6 +69,9 @@ test('runSecurityCheckForState blocks off-task pages', async () => {
         },
       },
       tabsApi: {
+        async get(tabId) {
+          return { id: tabId, url: 'https://example.com' };
+        },
         async sendMessage(tabId, message) {
           calls.messages.push({ tabId, message });
         },
@@ -119,7 +123,7 @@ test('runSecurityCheckForState reinjects the content script when an off-task tab
       appendDebugLog: async (entry) => {
         calls.debugEntries.push(entry);
       },
-      classify: async () => 'off-task',
+      classify: async () => ({ classification: 'off-task', score: 0.1, source: 'ml', usedPageSignals: false }),
       requestMlClassification: async () => {
         throw new Error('requestMlClassification should not be called');
       },
@@ -132,6 +136,9 @@ test('runSecurityCheckForState reinjects the content script when an off-task tab
         },
       },
       tabsApi: {
+        async get(tabId) {
+          return { id: tabId, url: 'https://www.youtube.com/watch?v=abc123' };
+        },
         async sendMessage(tabId, message) {
           sendAttempts += 1;
           calls.messages.push({ tabId, message });
@@ -189,7 +196,7 @@ test('runSecurityCheckForState does not inject scripts into restricted off-task 
       appendDebugLog: async (entry) => {
         calls.debugEntries.push(entry);
       },
-      classify: async () => 'off-task',
+      classify: async () => ({ classification: 'off-task', score: 0.1, source: 'ml', usedPageSignals: false }),
       requestMlClassification: async () => {
         throw new Error('requestMlClassification should not be called');
       },
@@ -202,6 +209,9 @@ test('runSecurityCheckForState does not inject scripts into restricted off-task 
         },
       },
       tabsApi: {
+        async get(tabId) {
+          return { id: tabId, url: 'chrome://extensions' };
+        },
         async sendMessage(tabId, message) {
           calls.messages.push({ tabId, message });
           throw new Error('Could not establish connection. Receiving end does not exist.');
@@ -249,7 +259,7 @@ test('runSecurityCheckForState marks on-task pages as good', async () => {
     createRunningState(),
     {
       appendDebugLog: async () => undefined,
-      classify: async () => 'on-task',
+      classify: async () => ({ classification: 'on-task', score: 0.8, source: 'ml', usedPageSignals: false }),
       requestMlClassification: async () => {
         throw new Error('requestMlClassification should not be called');
       },
@@ -262,6 +272,9 @@ test('runSecurityCheckForState marks on-task pages as good', async () => {
         },
       },
       tabsApi: {
+        async get(tabId) {
+          return { id: tabId, url: 'https://example.com' };
+        },
         async sendMessage() {
           throw new Error('sendMessage should not be called');
         },
@@ -299,7 +312,7 @@ test('runSecurityCheckForState clears badge for ambiguous pages', async () => {
     createRunningState(),
     {
       appendDebugLog: async () => undefined,
-      classify: async () => 'ambiguous',
+      classify: async () => ({ classification: 'ambiguous', score: 0.45, source: 'ml', usedPageSignals: true }),
       requestMlClassification: async () => {
         throw new Error('requestMlClassification should not be called');
       },
@@ -312,6 +325,9 @@ test('runSecurityCheckForState clears badge for ambiguous pages', async () => {
         },
       },
       tabsApi: {
+        async get(tabId) {
+          return { id: tabId, url: 'https://example.com' };
+        },
         async sendMessage() {
           throw new Error('sendMessage should not be called');
         },
@@ -360,7 +376,7 @@ test('runSecurityCheckForState treats allowed domains as on-task overrides', asy
       },
       classify: async () => {
         calls.classifyCalls += 1;
-        return 'off-task';
+        return { classification: 'off-task', score: 0.2, source: 'ml', usedPageSignals: false };
       },
       requestMlClassification: async () => {
         throw new Error('requestMlClassification should not be called');
@@ -374,6 +390,9 @@ test('runSecurityCheckForState treats allowed domains as on-task overrides', asy
         },
       },
       tabsApi: {
+        async get() {
+          throw new Error('get should not be called');
+        },
         async sendMessage() {
           throw new Error('sendMessage should not be called');
         },
@@ -428,7 +447,7 @@ test('runSecurityCheckForState treats active snoozes as on-task overrides', asyn
       },
       classify: async () => {
         calls.classifyCalls += 1;
-        return 'off-task';
+        return { classification: 'off-task', score: 0.2, source: 'ml', usedPageSignals: false };
       },
       requestMlClassification: async () => {
         throw new Error('requestMlClassification should not be called');
@@ -442,6 +461,9 @@ test('runSecurityCheckForState treats active snoozes as on-task overrides', asyn
         },
       },
       tabsApi: {
+        async get() {
+          throw new Error('get should not be called');
+        },
         async sendMessage() {
           throw new Error('sendMessage should not be called');
         },
@@ -497,7 +519,7 @@ test('runSecurityCheckForState expires snoozes and falls back to classification'
       },
       classify: async () => {
         calls.classifyCalls += 1;
-        return 'on-task';
+        return { classification: 'on-task', score: 0.8, source: 'ml', usedPageSignals: false };
       },
       requestMlClassification: async () => {
         throw new Error('requestMlClassification should not be called');
@@ -511,6 +533,9 @@ test('runSecurityCheckForState expires snoozes and falls back to classification'
         },
       },
       tabsApi: {
+        async get(tabId) {
+          return { id: tabId, url: 'https://docs.example.com/page' };
+        },
         async sendMessage() {
           throw new Error('sendMessage should not be called');
         },
@@ -540,4 +565,157 @@ test('runSecurityCheckForState expires snoozes and falls back to classification'
   assert.deepEqual(calls.badgeColor, [{ color: '#00FF00', tabId: 19 }]);
   assert.equal(calls.debugEntries[0]?.status, 'snooze-expired');
   assert.equal(calls.debugEntries.at(-1)?.status, 'classification-complete');
+});
+
+test('runSecurityCheckForState requests richer page signals for borderline classifications', async () => {
+  const calls = {
+    classifyArgs: [],
+    debugEntries: [],
+    messages: [],
+  };
+
+  await runSecurityCheckForState(
+    27,
+    'https://example.com/article',
+    'Focus article',
+    createRunningState(),
+    {
+      appendDebugLog: async (entry) => {
+        calls.debugEntries.push(entry);
+      },
+      classify: async (url, title, goal, context) => {
+        calls.classifyArgs.push({ context, goal, title, url });
+
+        if (context.pageSignals) {
+          return { classification: 'on-task', score: 0.71, source: 'ml', usedPageSignals: true };
+        }
+
+        return { classification: 'ambiguous', score: 0.45, source: 'ml', usedPageSignals: false };
+      },
+      requestMlClassification: async () => {
+        throw new Error('requestMlClassification should not be called');
+      },
+      actionApi: {
+        setBadgeText() {},
+        setBadgeBackgroundColor() {},
+      },
+      tabsApi: {
+        async get(tabId) {
+          return { id: tabId, url: 'https://example.com/article' };
+        },
+        async sendMessage(tabId, message) {
+          calls.messages.push({ tabId, message });
+
+          if (message.type === 'EXTRACT_PAGE_SIGNALS') {
+            return {
+              ok: true,
+              signals: {
+                appMarkers: ['document-page'],
+                durationMs: 12,
+                extractedAt: Date.now(),
+                headings: ['Focus article'],
+                mainTextSnippet: 'A detailed guide to planning focused work.',
+                metaDescription: 'Practical focus systems.',
+                navLabels: ['Docs'],
+                pathnameTokens: ['article'],
+                signalCounts: {
+                  appMarkers: 1,
+                  headings: 1,
+                  mainTextLength: 41,
+                  navLabels: 1,
+                  pathnameTokens: 1,
+                },
+                title: 'Focus article',
+              },
+            };
+          }
+
+          return undefined;
+        },
+        async query() {
+          return [];
+        },
+      },
+      scriptingApi: {
+        async executeScript() {
+          throw new Error('executeScript should not be called');
+        },
+        async insertCSS() {
+          throw new Error('insertCSS should not be called');
+        },
+      },
+      storageApi: {
+        async set() {
+          throw new Error('storageApi.set should not be called');
+        },
+      },
+    },
+  );
+
+  assert.equal(calls.classifyArgs.length, 2);
+  assert.equal(calls.classifyArgs[0].context.pageSignals, undefined);
+  assert.equal(calls.classifyArgs[1].context.pageSignals.title, 'Focus article');
+  assert.equal(calls.messages.length, 1);
+  assert.equal(calls.messages[0].message.type, 'EXTRACT_PAGE_SIGNALS');
+  assert.equal(calls.debugEntries.some((entry) => entry.status === 'signal-extraction-complete'), true);
+  assert.equal(calls.debugEntries.find((entry) => entry.status === 'signal-extraction-complete')?.signalSnapshot?.title, 'Focus article');
+});
+
+test('runSecurityCheckForState drops stale classification results when the tab navigates', async () => {
+  const calls = {
+    badgeText: [],
+    debugEntries: [],
+  };
+
+  await runSecurityCheckForState(
+    28,
+    'https://example.com/original',
+    'Original',
+    createRunningState(),
+    {
+      appendDebugLog: async (entry) => {
+        calls.debugEntries.push(entry);
+      },
+      classify: async () => ({ classification: 'off-task', score: 0.1, source: 'ml', usedPageSignals: false }),
+      requestMlClassification: async () => {
+        throw new Error('requestMlClassification should not be called');
+      },
+      actionApi: {
+        setBadgeText(details) {
+          calls.badgeText.push(details);
+        },
+        setBadgeBackgroundColor() {
+          throw new Error('setBadgeBackgroundColor should not be called');
+        },
+      },
+      tabsApi: {
+        async get(tabId) {
+          return { id: tabId, url: 'https://example.com/new-location' };
+        },
+        async sendMessage() {
+          throw new Error('sendMessage should not be called');
+        },
+        async query() {
+          return [];
+        },
+      },
+      scriptingApi: {
+        async executeScript() {
+          throw new Error('executeScript should not be called');
+        },
+        async insertCSS() {
+          throw new Error('insertCSS should not be called');
+        },
+      },
+      storageApi: {
+        async set() {
+          throw new Error('storageApi.set should not be called');
+        },
+      },
+    },
+  );
+
+  assert.deepEqual(calls.badgeText, []);
+  assert.equal(calls.debugEntries.at(-1)?.status, 'classification-skipped');
+  assert.equal(calls.debugEntries.at(-1)?.metadata?.reason, 'stale-tab');
 });

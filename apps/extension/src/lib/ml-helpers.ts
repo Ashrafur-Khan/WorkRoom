@@ -18,6 +18,8 @@ export const ML_THRESHOLDS = {
   offTask: 0.32,
 } as const;
 
+export const ML_BORDERLINE_WINDOW = 0.05;
+
 export function normalizeText(input: string): string {
   return input
     .toLowerCase()
@@ -33,13 +35,6 @@ export function extractHostnameTokens(url: string): string[] {
     .split(/[.-]/g)
     .map((token) => token.trim())
     .filter((token) => token.length > 1 && !HOSTNAME_STOP_WORDS.has(token));
-}
-
-export function buildPageContext(url: string, title: string): string {
-  const normalizedTitle = normalizeText(title);
-  const hostnameTokens = extractHostnameTokens(url);
-
-  return [normalizedTitle, hostnameTokens.join(' ')].filter(Boolean).join(' ').trim();
 }
 
 export function cosineSimilarity(left: number[], right: number[]): number {
@@ -71,4 +66,16 @@ export function classifyCosineScore(score: number): Classification {
   }
 
   return 'ambiguous';
+}
+
+export function isBorderlineClassification(score: number, classification: Classification): boolean {
+  if (classification === 'ambiguous') {
+    return true;
+  }
+
+  if (classification === 'on-task') {
+    return score < ML_THRESHOLDS.onTask + ML_BORDERLINE_WINDOW;
+  }
+
+  return score > ML_THRESHOLDS.offTask - ML_BORDERLINE_WINDOW;
 }

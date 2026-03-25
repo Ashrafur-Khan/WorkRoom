@@ -8,6 +8,7 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
   - `snoozedDomains` for temporary domain-level snoozes keyed to expiration timestamps
 - Session completion is driven by a Chrome alarm.
 - Classification is local-only and runs through TensorFlow.js + Universal Sentence Encoder in an offscreen document.
+- Classification now uses a two-stage local pipeline: cheap ML from URL/title context first, followed by conditional page-signal extraction for borderline results.
 - The background service worker remains the policy and enforcement layer.
 - When ML cannot produce a result, the background falls back to heuristics in `classifier.ts`.
 - Already-open tabs can now be blocked even after extension reload or late activation because the background can reinject the content script and retry delivery when a tab has no receiver.
@@ -30,25 +31,29 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 | Manifest | `apps/extension/manifest.json` | Declares permissions, host access, content script injection, background worker, popup, and extension-page CSP for the offscreen ML runtime. |
 | Popup | `apps/extension/src/popup/*` | Starts and stops sessions, persists session state, and sends `START_SESSION` / `STOP_SESSION`. |
 | Background | `apps/extension/src/background/index.ts` | Main orchestrator for alarms, tab updates, tab activation, runtime messages, debug-log retrieval, and session-scoped domain override updates. |
-| Security layer | `apps/extension/src/background/security.ts` | Applies classification results to badges, honors active domain overrides/snoozes, blocks off-task tabs, and reinjects content scripts into already-open tabs when message delivery has no receiver. |
-| Classifier | `apps/extension/src/lib/classifier.ts` | Top-level decision layer. Calls offscreen ML, logs fallback, and owns heuristic fallback policy. |
+| Security layer | `apps/extension/src/background/security.ts` | Applies classification results to badges, handles the borderline second-pass flow, honors active domain overrides/snoozes, blocks off-task tabs, and reinjects content scripts into already-open tabs when message delivery has no receiver. |
+| Classifier | `apps/extension/src/lib/classifier.ts` | Top-level decision layer. Returns structured classifier decisions, calls offscreen ML, logs fallback, and owns heuristic fallback policy. |
 | Offscreen bridge | `apps/extension/src/lib/offscreen-client.ts` | Creates/reuses the offscreen document and sends ML requests from background to offscreen. |
 | Offscreen runtime | `apps/extension/src/offscreen/*` | Offscreen document entrypoint that owns backend selection, TF.js/USE inference, and ML debug events. |
-| Model manager | `apps/extension/src/lib/model-manager.ts` | Offscreen-only TF.js setup, WebGL-first backend selection with CPU fallback, USE model loading, embedding cache, and ML scoring. |
-| Content script | `apps/extension/src/content/*` | Shows the block overlay and session-complete toast inside the page, including unblock and snooze actions for blocked tabs. |
+| Model manager | `apps/extension/src/lib/model-manager.ts` | Offscreen-only TF.js setup, WebGL-first backend selection with CPU fallback, USE model loading, embedding cache keyed by normalized page context, and ML scoring. |
+| Page signals | `apps/extension/src/lib/page-signals.ts` | Extracts bounded page signals, builds canonical page context, and generates sanitized debug snapshots for second-pass classification. |
+| Content script | `apps/extension/src/content/*` | Shows the block overlay and session-complete toast inside the page, and answers `EXTRACT_PAGE_SIGNALS` with bounded DOM-derived signals. |
 | Debug log | `apps/extension/src/background/debug-log.ts` | Stores a bounded ring buffer of debug events in `chrome.storage.session`. |
 
 ## ML Flow
 1. The background sees a relevant tab event.
-2. `classifier.ts` requests ML classification through `offscreen-client.ts`.
+2. `classifier.ts` requests Stage 1 ML classification through `offscreen-client.ts` using normalized URL/title context.
 3. The offscreen document selects a backend, preferring `webgl` and falling back to `cpu` if needed.
 4. The offscreen document loads or reuses TF.js + USE and returns either:
    - a `ready` result with `classification` and numeric `score`, or
    - a `fallback` result with `error` and `score: null`
-5. The background applies badge and blocking behavior.
-6. Before blocking, the background checks whether the tab's domain is already allowed for the current session or has an active snooze.
-7. If the tab is off-task and has no live content-script receiver, the background injects the content CSS/JS into that tab and retries `BLOCK_PAGE` once.
-8. If offscreen returns `fallback`, the background runs heuristic fallback from `classifier.ts`.
+5. If the Stage 1 ML result is borderline, the background requests bounded page signals from the content script and reruns ML with richer page context.
+6. If extraction fails, times out, is too sparse, or the page is restricted, the background falls back to the Stage 1 decision without breaking the flow.
+7. Before applying the final result, the background verifies the tab has not navigated and skips stale results.
+8. The background applies badge and blocking behavior.
+9. Before blocking, the background checks whether the tab's domain is already allowed for the current session or has an active snooze.
+10. If the tab is off-task and has no live content-script receiver, the background injects the content CSS/JS into that tab and retries `BLOCK_PAGE` once.
+11. If offscreen returns `fallback`, the background runs heuristic fallback from `classifier.ts`.
 
 ## Runtime Notes
 - ML does not run in the service worker.
@@ -56,10 +61,11 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - The extension enables WASM for extension pages via:
   - `"content_security_policy": { "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" }`
 - Classification is privacy-preserving: no browsing data is sent to a remote service.
-- The extension requests `host_permissions: ["<all_urls>"]` and `scripting` permission so it can classify pages by URL/title and recover page blocking for already-open tabs when no content-script receiver is available.
+- The extension requests `host_permissions: ["<all_urls>"]` and `scripting` permission so it can classify pages by URL/title, request bounded page signals when needed, and recover page blocking for already-open tabs when no content-script receiver is available.
 - Programmatic reinjection is only attempted for script-injectable URLs such as `http:`, `https:`, and `file:`. Restricted browser pages like `chrome://` remain non-blockable.
 - Session overrides and snoozes are domain-scoped and reset when the session ends.
 - Expired snoozes are pruned during background enforcement and the affected tabs return to normal classification behavior.
+- Extracted page content is not persisted long-term. Debug retention is session-only and stores a sanitized signal snapshot.
 
 ## Debugging and Observability
 - Background logs use `[WorkRoom:bg]`.
@@ -68,6 +74,12 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - `classification-complete` logs include `modelState`, backend, and when available also `classification` or `error`.
 - `model-loading` / `model-ready` events reflect the actual backend attempt and the selected backend.
 - When WebGL fails and CPU is selected, offscreen debug metadata includes downgrade context.
+- Signal extraction logs include:
+  - `signal-extraction-started`
+  - `signal-extraction-complete`
+  - `signal-extraction-fallback`
+  - `signal-extraction-timeout`
+- `classification-skipped` records stale-tab and tab-unavailable protection paths.
 - Background delivery logs distinguish normal block delivery from:
   - `block-message-recovered` after reinjecting the content script, and
   - `block-message-skipped` / `block-message-failed` when delivery cannot be recovered.
@@ -101,6 +113,7 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - Starting a session triggers an immediate sweep across all open tabs.
 - `on-task` tabs get a green badge.
 - `off-task` tabs get a red badge and a `BLOCK_PAGE` message to the content script.
+- Borderline ML results can trigger a second pass using bounded DOM-derived page signals before the final decision is applied.
 - If an already-open off-task tab has no content-script receiver, the background injects the content script and CSS into that tab and retries the block once.
 - Blocked pages now show three recovery paths:
   - go back immediately
@@ -110,12 +123,14 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - `ambiguous` tabs clear the badge.
 - The content script shows a full-page overlay for blocked pages, removes the overlay when the user allows or snoozes the domain, and shows a toast when the session ends.
 - Heuristic fallback still exists and is intentionally simple: domain allow/block lists plus title keyword matching against the user goal.
+- If a tab navigates while classification is in flight, the background discards the stale result instead of applying it to the new page.
 
 ## Known Limitations
 - Some browser-owned or restricted pages cannot be script-injected, so they can be classified and badged but not overlaid.
 - SPA-heavy sites can still produce timing edge cases around navigation and message delivery, though the background now retries by reinjecting the content script when possible.
 - Session overrides and snoozes are temporary only; there is no permanent user-managed allowlist yet.
 - Heuristic fallback is intentionally simple and title/domain based.
+- The extension still relies on content-script availability for richer second-pass page understanding and for page overlays on off-task tabs.
 - The extension has unit coverage for core classifier and security flows, but it does not yet have browser-level end-to-end coverage.
 - The README may lag behind active development; the codebase is the source of truth.
 

@@ -1,4 +1,4 @@
-import type { Classification, DebugLogEntry } from '../types';
+import type { Classification, DebugLogEntry, PageSignals } from '../types';
 import { normalizeText } from './ml-helpers';
 import { requestMlClassification } from './offscreen-client';
 
@@ -33,6 +33,13 @@ const PRODUCTIVE = [
 const defaultDependencies: MlClassifierDependencies = {
   appendDebugLog: async () => undefined,
   requestMlClassification,
+};
+
+export type ClassificationDecision = {
+  classification: Classification;
+  score: number | null;
+  source: 'heuristic' | 'ml' | 'override';
+  usedPageSignals: boolean;
 };
 
 function createDebugEntry(
@@ -100,20 +107,26 @@ export async function classifyUrl(
   url: string,
   title: string,
   goal: string,
-  context: { requestId: string; tabId?: number },
+  context: { pageSignals?: PageSignals; requestId: string; tabId?: number },
   dependencies: MlClassifierDependencies = defaultDependencies,
-): Promise<Classification> {
+): Promise<ClassificationDecision> {
   try {
     const domain = resolveDomain(url);
     const override = getBlocklistOverride(domain);
 
     if (override) {
-      return override;
+      return {
+        classification: override,
+        score: null,
+        source: 'override',
+        usedPageSignals: false,
+      };
     }
 
     const mlResult = await dependencies.requestMlClassification(
       {
         goal,
+        pageSignals: context.pageSignals,
         requestId: context.requestId,
         tabId: context.tabId,
         title,
@@ -139,10 +152,20 @@ export async function classifyUrl(
         tabId: context.tabId,
       });
 
-      return heuristicClassifyUrl(url, title, goal);
+      return {
+        classification: heuristicClassifyUrl(url, title, goal),
+        score: null,
+        source: 'heuristic',
+        usedPageSignals: Boolean(context.pageSignals),
+      };
     }
 
-    return mlResult.classification;
+    return {
+      classification: mlResult.classification,
+      score: mlResult.score,
+      source: 'ml',
+      usedPageSignals: Boolean(context.pageSignals),
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
 
@@ -160,7 +183,12 @@ export async function classifyUrl(
       tabId: context.tabId,
     });
 
-    return heuristicClassifyUrl(url, title, goal);
+    return {
+      classification: heuristicClassifyUrl(url, title, goal),
+      score: null,
+      source: 'heuristic',
+      usedPageSignals: Boolean(context.pageSignals),
+    };
   }
 }
 

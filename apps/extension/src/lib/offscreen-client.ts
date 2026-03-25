@@ -1,6 +1,5 @@
-import type { Classification, DebugLogEntry } from '../types';
+import type { Classification, DebugLogEntry, PageSignals } from '../types';
 import type { MlClassifyRequest, MlClassifyResponse } from './model-manager';
-import { buildPageContext } from './ml-helpers';
 
 const OFFSCREEN_DOCUMENT_PATH = 'src/offscreen/offscreen.html';
 const OFFSCREEN_JUSTIFICATION =
@@ -10,6 +9,7 @@ let createDocumentPromise: Promise<void> | null = null;
 
 export type ClassificationContext = {
   goal: string;
+  pageSignals?: PageSignals;
   requestId: string;
   tabId?: number;
   title: string;
@@ -109,9 +109,9 @@ export async function requestMlClassification(
 ): Promise<MlClassificationResult> {
   await ensureOffscreenDocument(appendDebugLog);
 
-  const message: MlClassifyRequest & { type: 'ML_CLASSIFY_REQUEST'; pageContext: string } = {
+  const message: MlClassifyRequest & { type: 'ML_CLASSIFY_REQUEST' } = {
     goal: context.goal,
-    pageContext: buildPageContext(context.url, context.title),
+    pageSignals: context.pageSignals,
     requestId: context.requestId,
     title: context.title,
     type: 'ML_CLASSIFY_REQUEST',
@@ -134,6 +134,7 @@ export async function requestMlClassification(
       metadata: {
         classification: classification ?? 'fallback',
         modelState: response.modelState,
+        usedPageSignals: Boolean(context.pageSignals),
       },
       error,
       requestId: context.requestId,

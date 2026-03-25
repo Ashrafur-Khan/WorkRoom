@@ -76,7 +76,9 @@ test('classifyUrl returns ML on-task result when offscreen responds positively',
     },
   );
 
-  assert.equal(result, 'on-task');
+  assert.equal(result.classification, 'on-task');
+  assert.equal(result.source, 'ml');
+  assert.equal(result.score, 0.87);
 });
 
 test('classifyUrl returns ML off-task result when offscreen responds negatively', async () => {
@@ -99,7 +101,9 @@ test('classifyUrl returns ML off-task result when offscreen responds negatively'
     },
   );
 
-  assert.equal(result, 'off-task');
+  assert.equal(result.classification, 'off-task');
+  assert.equal(result.source, 'ml');
+  assert.equal(result.score, 0.12);
 });
 
 test('classifyUrl falls back to heuristics when offscreen request fails', async () => {
@@ -116,7 +120,9 @@ test('classifyUrl falls back to heuristics when offscreen request fails', async 
     },
   );
 
-  assert.equal(result, 'on-task');
+  assert.equal(result.classification, 'on-task');
+  assert.equal(result.source, 'heuristic');
+  assert.equal(result.score, null);
 });
 
 test('classifyUrl uses background heuristic when offscreen returns fallback', async () => {
@@ -139,7 +145,9 @@ test('classifyUrl uses background heuristic when offscreen returns fallback', as
     },
   );
 
-  assert.equal(result, 'on-task');
+  assert.equal(result.classification, 'on-task');
+  assert.equal(result.source, 'heuristic');
+  assert.equal(result.score, null);
 });
 
 test('classifyUrl falls back to ambiguous for invalid URLs', async () => {
@@ -155,7 +163,8 @@ test('classifyUrl falls back to ambiguous for invalid URLs', async () => {
       },
     },
   );
-  assert.equal(result, 'ambiguous');
+  assert.equal(result.classification, 'ambiguous');
+  assert.equal(result.source, 'heuristic');
 });
 
 test('heuristic classifier returns ambiguous for sites not in the background distraction list', () => {
@@ -185,7 +194,8 @@ test('background heuristic does not force youtube off-task during ML fallback', 
     },
   );
 
-  assert.equal(result, 'on-task');
+  assert.equal(result.classification, 'on-task');
+  assert.equal(result.source, 'heuristic');
 });
 
 test('classifyWithModel returns fallback response if tf runtime fails', async () => {

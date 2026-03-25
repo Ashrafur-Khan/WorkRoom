@@ -1,14 +1,16 @@
-import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  readFileSync,
+  renameSync,
   writeFileSync,
 } from 'node:fs';
 import { cp } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { build } from 'vite';
 
 const require = createRequire(import.meta.url);
 
@@ -35,16 +37,78 @@ async function ensureDirectory(path) {
   mkdirSync(path, { recursive: true });
 }
 
-async function runViteBuild() {
-  const vitePackageRoot = dirname(require.resolve('vite/package.json'));
-  const viteBin = resolve(vitePackageRoot, 'bin', 'vite.js');
-  const result = spawnSync(process.execPath, [viteBin, 'build', '--config', 'apps/extension/vite.config.ts'], {
-    cwd: repoRoot,
-    stdio: 'inherit',
+async function runViteBuilds() {
+  await build({
+    configFile: false,
+    publicDir: false,
+    root: extensionRoot,
+    build: {
+      emptyOutDir: true,
+      outDir: distRoot,
+      rollupOptions: {
+        input: {
+          popup: resolve(extensionRoot, 'src/popup/popup.html'),
+          offscreen: resolve(extensionRoot, 'src/offscreen/offscreen.html'),
+          background: resolve(extensionRoot, 'src/background/index.ts'),
+        },
+        output: {
+          entryFileNames: 'src/[name]/index.js',
+          chunkFileNames: 'assets/[name].js',
+          assetFileNames: 'assets/[name].[ext]',
+        },
+      },
+    },
   });
 
-  if (result.status !== 0) {
-    throw new Error(`Vite build failed with exit code ${result.status ?? 'unknown'}.`);
+  await build({
+    configFile: false,
+    publicDir: false,
+    root: extensionRoot,
+    build: {
+      cssCodeSplit: false,
+      emptyOutDir: false,
+      lib: {
+        cssFileName: 'content',
+        entry: resolve(extensionRoot, 'src/content/index.ts'),
+        fileName: () => 'src/content/index.js',
+        formats: ['iife'],
+        name: 'WorkRoomContentScript',
+      },
+      outDir: distRoot,
+      rollupOptions: {
+        output: {
+          assetFileNames: (assetInfo) => {
+            if (assetInfo.name === 'content.css') {
+              return 'assets/content.css';
+            }
+
+            return 'assets/[name].[ext]';
+          },
+        },
+      },
+    },
+  });
+}
+
+function validateContentScriptBundle() {
+  const contentScriptPath = resolve(distRoot, 'src/content/index.js');
+  const contentScript = readFileSync(contentScriptPath, 'utf8');
+
+  if (/\bimport\b|\bexport\b/.test(contentScript)) {
+    throw new Error(`Content script bundle contains ESM syntax: ${contentScriptPath}`);
+  }
+
+  if (/assets\/[^"'`\s]+\.js\b/.test(contentScript)) {
+    throw new Error(`Content script bundle references external JS chunks: ${contentScriptPath}`);
+  }
+}
+
+function normalizeContentStyleAsset() {
+  const emittedPath = resolve(distRoot, 'assets/style.css');
+  const expectedPath = resolve(distRoot, 'assets/content.css');
+
+  if (existsSync(emittedPath)) {
+    renameSync(emittedPath, expectedPath);
   }
 }
 
@@ -126,7 +190,9 @@ async function ensureUseAssets() {
 }
 
 async function main() {
-  await runViteBuild();
+  await runViteBuilds();
+  normalizeContentStyleAsset();
+  validateContentScriptBundle();
   await copyStaticAssets();
   await copyWasmAssets();
   await ensureUseAssets();

@@ -3,8 +3,9 @@ import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-backend-cpu';
 import '@tensorflow/tfjs-backend-webgl';
 
-import type { Classification } from '../types';
-import { buildPageContext, classifyCosineScore, cosineSimilarity, normalizeText } from './ml-helpers';
+import type { Classification, PageSignals } from '../types';
+import { classifyCosineScore, cosineSimilarity, normalizeText } from './ml-helpers';
+import { buildNormalizedPageContext } from './page-signals';
 
 const MODEL_DIRECTORY = 'assets/models/use';
 const MODEL_URL = `${MODEL_DIRECTORY}/model.json`;
@@ -26,6 +27,7 @@ type ModelManagerTestOverrides = {
 
 export type MlClassifyRequest = {
   goal: string;
+  pageSignals?: PageSignals;
   requestId: string;
   title: string;
   url: string;
@@ -268,7 +270,11 @@ export async function classifyWithModel(
 ): Promise<MlClassifyResponse> {
   try {
     const normalizedGoal = normalizeText(request.goal);
-    const pageContext = buildPageContext(request.url, request.title);
+    const pageContext = buildNormalizedPageContext({
+      pageSignals: request.pageSignals,
+      title: request.title,
+      url: request.url,
+    });
 
     if (!normalizedGoal || !pageContext) {
       return {
@@ -287,7 +293,7 @@ export async function classifyWithModel(
       notifyDebug,
       request.requestId,
     );
-    const pageCacheKey = `${request.url}|${pageContext}`;
+    const pageCacheKey = `page:${pageContext}`;
     const pageResult = await getCachedEmbedding(
       pageEmbeddingCache,
       pageCacheKey,

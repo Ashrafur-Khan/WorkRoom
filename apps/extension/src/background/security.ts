@@ -1,15 +1,18 @@
 import { getDomainFromUrl } from '../lib/session-utilities';
 import { requestMlClassification } from '../lib/offscreen-client';
-import { classifyUrl, clearClassificationCaches } from '../lib/classifier';
-import type { DebugLogEntry, RunningSessionState, SessionState } from '../types';
+import { classifyUrl, clearClassificationCaches, type ClassificationDecision } from '../lib/classifier';
+import { isBorderlineClassification } from '../lib/ml-helpers';
+import { createSignalSnapshot, hasMeaningfulPageSignals } from '../lib/page-signals';
+import type { DebugLogEntry, ExtractPageSignalsResponse, PageSignals, RunningSessionState, SessionState } from '../types';
 
 type ActionApi = Pick<typeof chrome.action, 'setBadgeText' | 'setBadgeBackgroundColor'>;
-type TabsApi = Pick<typeof chrome.tabs, 'sendMessage' | 'query'>;
+type TabsApi = Pick<typeof chrome.tabs, 'get' | 'sendMessage' | 'query'>;
 type ScriptingApi = Pick<typeof chrome.scripting, 'executeScript' | 'insertCSS'>;
 type StorageApi = Pick<typeof chrome.storage.local, 'set'>;
 
 const CONTENT_SCRIPT_FILE = 'src/content/index.js';
 const CONTENT_STYLE_FILE = 'assets/content.css';
+const SIGNAL_EXTRACTION_TIMEOUT_MS = 200;
 
 export type SecurityCheckDependencies = {
   actionApi: ActionApi;
@@ -167,7 +170,7 @@ async function applyClassificationResult(
   dependencies: SecurityCheckDependencies,
   tabId: number,
   url: string,
-  classification: 'on-task' | 'off-task' | 'ambiguous',
+  classification: ClassificationDecision['classification'],
   goal: string,
   requestId: string,
 ): Promise<void> {
@@ -207,6 +210,218 @@ async function applyClassificationResult(
       tabId,
     }),
   );
+}
+
+function shouldRequestPageSignals(decision: ClassificationDecision): boolean {
+  if (decision.usedPageSignals || decision.source !== 'ml' || decision.score === null) {
+    return false;
+  }
+
+  return isBorderlineClassification(decision.score, decision.classification);
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error(`Timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+
+    void promise.then(
+      (value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function requestPageSignals(
+  dependencies: SecurityCheckDependencies,
+  tabId: number,
+  url: string,
+  requestId: string,
+): Promise<PageSignals | null> {
+  const message = { type: 'EXTRACT_PAGE_SIGNALS' as const };
+
+  await dependencies.appendDebugLog(
+    createDebugEntry('signal-extraction-started', {
+      metadata: { timeoutMs: SIGNAL_EXTRACTION_TIMEOUT_MS, url },
+      requestId,
+      tabId,
+    }),
+  );
+
+  const attemptExtraction = async (): Promise<ExtractPageSignalsResponse> =>
+    withTimeout(
+      dependencies.tabsApi.sendMessage(tabId, message) as Promise<ExtractPageSignalsResponse>,
+      SIGNAL_EXTRACTION_TIMEOUT_MS,
+    );
+
+  try {
+    const response = await attemptExtraction();
+
+    if (!response.ok) {
+      await dependencies.appendDebugLog(
+        createDebugEntry('signal-extraction-fallback', {
+          error: response.reason,
+          metadata: { reason: 'content-script-response', url },
+          requestId,
+          tabId,
+        }),
+      );
+      return null;
+    }
+
+    if (!hasMeaningfulPageSignals(response.signals)) {
+      await dependencies.appendDebugLog(
+        createDebugEntry('signal-extraction-fallback', {
+          metadata: { reason: 'signals-too-sparse', url },
+          requestId,
+          tabId,
+        }),
+      );
+      return null;
+    }
+
+    await dependencies.appendDebugLog(
+      createDebugEntry('signal-extraction-complete', {
+        metadata: {
+          appMarkers: response.signals.signalCounts.appMarkers,
+          durationMs: response.signals.durationMs,
+          headings: response.signals.signalCounts.headings,
+          mainTextLength: response.signals.signalCounts.mainTextLength,
+          navLabels: response.signals.signalCounts.navLabels,
+          pathnameTokens: response.signals.signalCounts.pathnameTokens,
+          url,
+        },
+        requestId,
+        signalSnapshot: createSignalSnapshot(response.signals),
+        tabId,
+      }),
+    );
+    return response.signals;
+  } catch (error) {
+    const extractionError = getErrorMessage(error);
+
+    if (extractionError.includes('Timed out')) {
+      await dependencies.appendDebugLog(
+        createDebugEntry('signal-extraction-timeout', {
+          error: extractionError,
+          metadata: { timeoutMs: SIGNAL_EXTRACTION_TIMEOUT_MS, url },
+          requestId,
+          tabId,
+        }),
+      );
+      return null;
+    }
+
+    if (isMissingReceiverError(extractionError) && isInjectableUrl(url)) {
+      try {
+        await dependencies.scriptingApi.executeScript({
+          files: [CONTENT_SCRIPT_FILE],
+          target: { tabId },
+        });
+
+        const retryResponse = await attemptExtraction();
+        if (!retryResponse.ok || !hasMeaningfulPageSignals(retryResponse.signals)) {
+          await dependencies.appendDebugLog(
+            createDebugEntry('signal-extraction-fallback', {
+              error: retryResponse.ok ? undefined : retryResponse.reason,
+              metadata: {
+                reason: retryResponse.ok ? 'signals-too-sparse' : 'reinject-response-failed',
+                strategy: 'reinject-content-script',
+                url,
+              },
+              requestId,
+              tabId,
+            }),
+          );
+          return null;
+        }
+
+        await dependencies.appendDebugLog(
+          createDebugEntry('signal-extraction-complete', {
+            metadata: {
+              appMarkers: retryResponse.signals.signalCounts.appMarkers,
+              durationMs: retryResponse.signals.durationMs,
+              headings: retryResponse.signals.signalCounts.headings,
+              mainTextLength: retryResponse.signals.signalCounts.mainTextLength,
+              navLabels: retryResponse.signals.signalCounts.navLabels,
+              pathnameTokens: retryResponse.signals.signalCounts.pathnameTokens,
+              strategy: 'reinject-content-script',
+              url,
+            },
+            requestId,
+            signalSnapshot: createSignalSnapshot(retryResponse.signals),
+            tabId,
+          }),
+        );
+        return retryResponse.signals;
+      } catch (retryError) {
+        await dependencies.appendDebugLog(
+          createDebugEntry('signal-extraction-fallback', {
+            error: getErrorMessage(retryError),
+            metadata: { reason: 'reinject-failed', url },
+            requestId,
+            tabId,
+          }),
+        );
+        return null;
+      }
+    }
+
+    await dependencies.appendDebugLog(
+      createDebugEntry('signal-extraction-fallback', {
+        error: extractionError,
+        metadata: { reason: 'send-message-failed', url },
+        requestId,
+        tabId,
+      }),
+    );
+    return null;
+  }
+}
+
+async function isStaleTab(
+  dependencies: SecurityCheckDependencies,
+  tabId: number,
+  url: string,
+  requestId: string,
+): Promise<boolean> {
+  try {
+    const tab = await dependencies.tabsApi.get(tabId);
+
+    if (!tab.url || tab.url !== url) {
+      await dependencies.appendDebugLog(
+        createDebugEntry('classification-skipped', {
+          metadata: {
+            currentUrl: tab.url ?? null,
+            reason: 'stale-tab',
+            url,
+          },
+          requestId,
+          tabId,
+        }),
+      );
+      return true;
+    }
+  } catch (error) {
+    await dependencies.appendDebugLog(
+      createDebugEntry('classification-skipped', {
+        error: getErrorMessage(error),
+        metadata: { reason: 'tab-unavailable', url },
+        requestId,
+        tabId,
+      }),
+    );
+    return true;
+  }
+
+  return false;
 }
 
 async function applyOverrideResult(
@@ -307,7 +522,30 @@ export async function runSecurityCheckForState(
       requestMlClassification: dependencies.requestMlClassification,
     },
   );
-  await applyClassificationResult(dependencies, tabId, url, classification, state.goal, requestId);
+  let finalDecision = classification;
+
+  if (shouldRequestPageSignals(classification)) {
+    const pageSignals = await requestPageSignals(dependencies, tabId, url, requestId);
+
+    if (pageSignals) {
+      finalDecision = await dependencies.classify(
+        url,
+        title,
+        state.goal,
+        { pageSignals, requestId, tabId },
+        {
+          appendDebugLog: dependencies.appendDebugLog,
+          requestMlClassification: dependencies.requestMlClassification,
+        },
+      );
+    }
+  }
+
+  if (await isStaleTab(dependencies, tabId, url, requestId)) {
+    return;
+  }
+
+  await applyClassificationResult(dependencies, tabId, url, finalDecision.classification, state.goal, requestId);
 }
 
 export async function clearBadgesForAllTabs(

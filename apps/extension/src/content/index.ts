@@ -1,10 +1,17 @@
 import './styles.css';
+import type { ExtractPageSignalsResponse } from '../types';
+import { extractPageSignalsFromDocument } from '../lib/page-signals';
 
 const OVERLAY_ID = 'workroom-overlay-id';
 const GOAL_COPY_ID = 'workroom-goal-copy';
 const SNOOZE_OPTIONS = [5, 10, 15] as const;
 
-chrome.runtime.onMessage.addListener((request) => {
+chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+  if (request.type === 'EXTRACT_PAGE_SIGNALS') {
+    sendResponse(extractCurrentPageSignals());
+    return true;
+  }
+
   if (request.type === 'SESSION_COMPLETE') {
     removeBlockScreen();
     showNotification(request.payload.message);
@@ -17,7 +24,25 @@ chrome.runtime.onMessage.addListener((request) => {
   if (request.type === 'UNBLOCK_PAGE') {
     removeBlockScreen();
   }
+
+  return false;
 });
+
+console.info('[WorkRoom:content] Listener ready.', { url: window.location.href });
+
+export function extractCurrentPageSignals(): ExtractPageSignalsResponse {
+  try {
+    return {
+      ok: true,
+      signals: extractPageSignalsFromDocument(document, window.location.href),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
 
 function showNotification(text: string) {
   const container = document.createElement('div');
