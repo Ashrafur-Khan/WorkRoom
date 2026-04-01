@@ -5,6 +5,9 @@ import { extractPageSignalsFromDocument } from '../lib/page-signals';
 const OVERLAY_ID = 'workroom-overlay-id';
 const GOAL_COPY_ID = 'workroom-goal-copy';
 const SNOOZE_OPTIONS = [5, 10, 15] as const;
+const SNOOZE_COOLDOWN_SECONDS = 10;
+
+let cooldownIntervalId: ReturnType<typeof setInterval> | null = null;
 
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request.type === 'EXTRACT_PAGE_SIGNALS') {
@@ -120,7 +123,7 @@ function showBlockScreen(goal: string) {
     button.className = 'workroom-btn-snooze';
     button.textContent = `${minutes} min`;
     button.addEventListener('click', () => {
-      void snoozeDomain(minutes);
+      showCooldownScreen(minutes);
     });
     snoozeActions.appendChild(button);
   });
@@ -141,6 +144,11 @@ function showBlockScreen(goal: string) {
 }
 
 function removeBlockScreen() {
+  if (cooldownIntervalId !== null) {
+    clearInterval(cooldownIntervalId);
+    cooldownIntervalId = null;
+  }
+
   const overlay = document.getElementById(OVERLAY_ID);
 
   if (!overlay) {
@@ -149,6 +157,55 @@ function removeBlockScreen() {
 
   document.body.style.overflow = overlay.dataset.previousOverflow ?? '';
   overlay.remove();
+}
+
+function cancelCooldown(): void {
+  if (cooldownIntervalId !== null) {
+    clearInterval(cooldownIntervalId);
+    cooldownIntervalId = null;
+  }
+  history.back();
+}
+
+function showCooldownScreen(durationMinutes: number): void {
+  const overlay = document.getElementById(OVERLAY_ID);
+  if (!overlay) return;
+
+  overlay.innerHTML = '';
+
+  const title = document.createElement('h1');
+  title.textContent = 'Snooze Pending...';
+  overlay.appendChild(title);
+
+  const warning = document.createElement('p');
+  warning.textContent = "If you leave now, the snooze won't take effect!";
+  overlay.appendChild(warning);
+
+  const timerWrapper = document.createElement('div');
+  timerWrapper.className = 'workroom-cooldown-timer';
+
+  const digits = document.createElement('span');
+  digits.className = 'workroom-cooldown-digits';
+  digits.textContent = String(SNOOZE_COOLDOWN_SECONDS);
+  timerWrapper.appendChild(digits);
+  overlay.appendChild(timerWrapper);
+
+  const cancelButton = document.createElement('button');
+  cancelButton.className = 'workroom-btn-back';
+  cancelButton.textContent = 'Take me back';
+  cancelButton.addEventListener('click', cancelCooldown);
+  overlay.appendChild(cancelButton);
+
+  let secondsLeft = SNOOZE_COOLDOWN_SECONDS;
+  cooldownIntervalId = setInterval(() => {
+    secondsLeft--;
+    digits.textContent = String(secondsLeft);
+    if (secondsLeft <= 0) {
+      clearInterval(cooldownIntervalId!);
+      cooldownIntervalId = null;
+      void snoozeDomain(durationMinutes);
+    }
+  }, 1000);
 }
 
 async function allowDomainForSession(): Promise<void> {

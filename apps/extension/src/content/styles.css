@@ -128,3 +128,22 @@
 .workroom-btn-snooze:hover {
   background-color: #c62828;
 }
+
+.workroom-cooldown-timer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  background-color: #fff3e0;
+  border: 4px solid #e53935;
+  margin-bottom: 32px;
+}
+
+.workroom-cooldown-digits {
+  font-size: 48px;
+  font-weight: 700;
+  color: #e53935;
+  font-variant-numeric: tabular-nums;
+}

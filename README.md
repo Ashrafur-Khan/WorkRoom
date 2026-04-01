@@ -118,7 +118,7 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - Blocked pages now show three recovery paths:
   - go back immediately
   - mark the current domain as "not a distraction" for the rest of the session
-  - snooze the current domain for `5`, `10`, or `15` minutes
+  - snooze the current domain for `5`, `10`, or `15` minutes (snooze activation is delayed by a 10-second cooldown; if the user navigates away or clicks "Take me back" before the countdown ends, the snooze is cancelled)
 - Domains covered by an active override or snooze are treated as allowed and get a green badge during that period.
 - `ambiguous` tabs clear the badge.
 - The content script shows a full-page overlay for blocked pages, removes the overlay when the user allows or snoozes the domain, and shows a toast when the session ends.
