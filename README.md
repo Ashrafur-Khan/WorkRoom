@@ -33,7 +33,7 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 | Classifier | `apps/extension/src/lib/classifier.ts` | Top-level decision layer. Returns structured classifier decisions, calls offscreen ML, logs fallback, and owns heuristic fallback policy. |
 | Offscreen bridge | `apps/extension/src/lib/offscreen-client.ts` | Creates/reuses the offscreen document and sends ML requests from background to offscreen. |
 | Offscreen runtime | `apps/extension/src/offscreen/*` | Offscreen document entrypoint that owns ONNX Runtime inference and ML debug events. |
-| Model manager | `apps/extension/src/lib/model-manager.ts` | Loads the MiniLM-L6-v2 pipeline via `@huggingface/transformers`, manages an embedding cache keyed by normalized page context, and produces ML scores. |
+| Model manager | `apps/extension/src/lib/model-manager.ts` | Loads the MiniLM-L6-v2 pipeline via `@huggingface/transformers`, preflights the packaged model and ONNX Runtime assets, manages offscreen embedding caches keyed by normalized page context, and produces ML scores. |
 | Page signals | `apps/extension/src/lib/page-signals.ts` | Extracts bounded page signals, builds canonical page context, and generates sanitized debug snapshots for second-pass classification. |
 | Content script | `apps/extension/src/content/*` | Shows the block overlay and session-complete toast inside the page, and answers `EXTRACT_PAGE_SIGNALS` with bounded DOM-derived signals. |
 | Debug log | `apps/extension/src/background/debug-log.ts` | Stores a bounded ring buffer of debug events in `chrome.storage.session`. |
@@ -55,6 +55,8 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 ## Runtime Notes
 - ML does not run in the service worker.
 - The offscreen document exists because ONNX Runtime Web requires a DOM-capable extension page.
+- Before pipeline initialization, the offscreen runtime verifies that `assets/models/minilm/Xenova/all-MiniLM-L6-v2/config.json` is fetchable. This is a lightweight packaged-model sentinel used to fail fast with a precise asset-path error if the model bundle is missing or unreadable.
+- Before pipeline initialization, the offscreen runtime also verifies that the packaged ONNX Runtime loader and WASM files are fetchable, so missing ORT assets fail with a precise extension-path error instead of a generic backend-init failure.
 - The extension enables WASM for extension pages via:
   - `"content_security_policy": { "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" }`
 - Classification is privacy-preserving: no browsing data is sent to a remote service.
@@ -69,7 +71,10 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - Offscreen logs use `[WorkRoom:offscreen]`.
 - `GET_DEBUG_LOGS` returns recent debug entries from `chrome.storage.session`.
 - `classification-complete` logs include `modelState`, backend, and when available also `classification` or `error`.
-- `model-loading` / `model-ready` events reflect pipeline initialization. Backend is always `wasm`.
+- `classification-complete` and `classification-fallback` include timing metadata for classification work.
+- `model-loading` / `model-ready` events reflect pipeline initialization. Backend is always `wasm`, and `model-ready` includes load timing metadata.
+- If model preflight fails before pipeline creation, the fallback error now includes the exact asset path, such as `assets/models/minilm/Xenova/all-MiniLM-L6-v2/config.json`, instead of only reporting `Failed to fetch`.
+- If ONNX Runtime asset preflight fails before pipeline creation, the fallback error includes the exact missing runtime path, such as `assets/ort-wasm-simd-threaded.jsep.mjs`.
 - Signal extraction logs include:
   - `signal-extraction-started`
   - `signal-extraction-complete`
@@ -103,8 +108,10 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - The build script copies:
   - `apps/extension/manifest.json`
   - `apps/extension/workicon.png`
-  - ONNX Runtime WASM files from `onnxruntime-web` into `dist/assets/`
-  - MiniLM-L6-v2 model files (config, tokenizer, quantized ONNX model) into `dist/assets/models/minilm/`
+  - ONNX Runtime web loader and WASM files from `onnxruntime-web` into `dist/assets/`
+  - MiniLM-L6-v2 model files (config, tokenizer, quantized ONNX model) into `dist/assets/models/minilm/Xenova/all-MiniLM-L6-v2/`
+  - `config.json` acts as the runtime preflight sentinel used by the offscreen loader before pipeline initialization
+  - The build validates that the required ORT runtime module and WASM files are present in `dist/assets/` before succeeding
   - To pre-vendor the model and avoid a network download at build time, place the model files in `apps/extension/ml/minilm/`
 
 ## Current Behavior

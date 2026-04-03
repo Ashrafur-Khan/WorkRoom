@@ -83,6 +83,8 @@ async function endSession(goal?: string): Promise<void> {
   await chrome.storage.local.set({ sessionState: createIdleState() });
   resetClassifierSessionState();
   await clearBadgesForAllTabs();
+  // Closing the offscreen document is also the supported ML teardown path, so
+  // session completion drops cached embeddings without changing session state.
   await closeOffscreenDocument(appendDebugLog);
 
   chrome.notifications.create(
@@ -156,6 +158,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'STOP_SESSION') {
     void (async () => {
       await appendDebugLog(createDebugEntry('session-stopped'));
+      // Manual stop follows the same offscreen teardown path as alarm-driven
+      // completion so model caches do not leak across sessions.
       await closeOffscreenDocument(appendDebugLog);
       resetClassifierSessionState();
       await clearBadgesForAllTabs();

@@ -16,6 +16,8 @@ function emitDebugEvent(event: MlDebugEvent): void {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'ML_CLASSIFY_REQUEST') {
+    // The offscreen document owns model lifetime so the background can keep a
+    // stable request/response contract without loading ML code itself.
     void (async () => {
       const response = await classifyWithModel(message as MlClassifyRequest, emitDebugEvent);
       sendResponse(response satisfies MlClassifyResponse);
@@ -25,6 +27,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === 'ML_OFFSCREEN_CLOSE') {
+    // Session stop and completion both tear down the offscreen document, so this
+    // is the runtime hook that drops cached embeddings between sessions.
     emitDebugEvent({ source: 'offscreen', status: 'offscreen-closed', timestamp: Date.now() });
     clearModelCaches();
   }

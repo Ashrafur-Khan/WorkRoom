@@ -10,6 +10,7 @@ const {
 } = require('../.test-build/lib/ml-helpers.js');
 const {
   classifyWithModel,
+  clearModelCaches,
   configureModelManagerForTesting,
   resetModelManagerForTesting,
 } = require('../.test-build/lib/model-manager.js');
@@ -207,7 +208,51 @@ test('classifyWithModel returns fallback response if pipeline init fails', async
   assert.match(result.error, /pipeline initialization failed/i);
 });
 
-test('classifyWithModel loads pipeline and classifies correctly', async () => {
+test('classifyWithModel reports the config.json sentinel when model asset fetch fails', async () => {
+  installChromeRuntime();
+  global.fetch = async () => {
+    throw new Error('Failed to fetch');
+  };
+
+  const result = await classifyWithModel({
+    goal: 'Study calculus',
+    requestId: 'req-asset-fetch',
+    title: 'Calculus lecture notes',
+    url: 'https://example.edu/calculus',
+  });
+
+  assert.equal(result.modelState, 'fallback');
+  assert.equal(result.score, null);
+  assert.equal(typeof result.error, 'string');
+  assert.match(result.error, /assets\/models\/minilm\/Xenova\/all-MiniLM-L6-v2\/config\.json/i);
+  assert.match(result.error, /failed to fetch/i);
+});
+
+test('classifyWithModel reports the ORT loader sentinel when runtime asset fetch fails', async () => {
+  installChromeRuntime();
+  global.fetch = async (path) => {
+    if (String(path).includes('ort-wasm-simd-threaded.jsep.mjs')) {
+      throw new Error('Failed to fetch');
+    }
+
+    return { ok: true };
+  };
+
+  const result = await classifyWithModel({
+    goal: 'Study calculus',
+    requestId: 'req-ort-asset-fetch',
+    title: 'Calculus lecture notes',
+    url: 'https://example.edu/calculus',
+  });
+
+  assert.equal(result.modelState, 'fallback');
+  assert.equal(result.score, null);
+  assert.equal(typeof result.error, 'string');
+  assert.match(result.error, /assets\/ort-wasm-simd-threaded\.jsep\.mjs/i);
+  assert.match(result.error, /failed to fetch/i);
+});
+
+test('classifyWithModel emits wasm-only debug metadata while classifying', async () => {
   installChromeRuntime();
 
   configureModelManagerForTesting({
@@ -232,8 +277,18 @@ test('classifyWithModel loads pipeline and classifies correctly', async () => {
   assert.equal(result.modelState, 'ready');
   assert.equal(result.backend, 'wasm');
   assert.equal(result.classification, 'on-task');
+  assert.equal(debugEvents[0]?.status, 'cache-miss');
+  assert.equal(debugEvents[0]?.metadata?.cache, 'goal');
+  assert.equal(debugEvents[1]?.status, 'model-loading');
+  assert.equal(debugEvents[1]?.backend, 'wasm');
+  assert.equal(debugEvents[2]?.status, 'model-ready');
+  assert.equal(debugEvents[2]?.backend, 'wasm');
+  assert.equal(typeof debugEvents[2]?.metadata?.loadDurationMs, 'number');
+  assert.equal(debugEvents[3]?.status, 'cache-miss');
+  assert.equal(debugEvents[3]?.metadata?.cache, 'page');
   assert.equal(debugEvents.at(-1)?.status, 'classification-complete');
   assert.equal(debugEvents.at(-1)?.backend, 'wasm');
+  assert.equal(typeof debugEvents.at(-1)?.metadata?.classificationDurationMs, 'number');
 });
 
 test('classifyWithModel reuses cached pipeline across calls', async () => {
@@ -266,6 +321,75 @@ test('classifyWithModel reuses cached pipeline across calls', async () => {
   });
 
   assert.equal(createCount, 1);
+});
+
+test('classifyWithModel emits fallback timing metadata when inference fails', async () => {
+  installChromeRuntime();
+
+  const debugEvents = [];
+
+  configureModelManagerForTesting({
+    createPipeline: async () => async () => {
+      throw new Error('pipeline blew up');
+    },
+    verifyAssetExists: async () => undefined,
+  });
+
+  const result = await classifyWithModel(
+    {
+      goal: 'Study calculus',
+      requestId: 'req-fallback-debug',
+      title: 'Calculus lecture notes',
+      url: 'https://example.edu/calculus',
+    },
+    (event) => debugEvents.push(event),
+  );
+
+  assert.equal(result.modelState, 'fallback');
+  assert.equal(debugEvents.at(-1)?.status, 'classification-fallback');
+  assert.equal(debugEvents.at(-1)?.backend, 'wasm');
+  assert.equal(typeof debugEvents.at(-1)?.metadata?.classificationDurationMs, 'number');
+});
+
+test('clearModelCaches forces page and goal embeddings to be recomputed', async () => {
+  installChromeRuntime();
+
+  const seenInputs = [];
+
+  configureModelManagerForTesting({
+    createPipeline: async () => async (text) => {
+      seenInputs.push(text);
+      return { data: new Float32Array([1, 0, 0]) };
+    },
+    verifyAssetExists: async () => undefined,
+  });
+
+  await classifyWithModel({
+    goal: 'Study calculus',
+    requestId: 'req-cache-a',
+    title: 'Calculus lecture notes',
+    url: 'https://example.edu/calculus',
+  });
+
+  await classifyWithModel({
+    goal: 'Study calculus',
+    requestId: 'req-cache-b',
+    title: 'Calculus lecture notes',
+    url: 'https://example.edu/calculus',
+  });
+
+  assert.equal(seenInputs.length, 2);
+
+  clearModelCaches();
+
+  await classifyWithModel({
+    goal: 'Study calculus',
+    requestId: 'req-cache-c',
+    title: 'Calculus lecture notes',
+    url: 'https://example.edu/calculus',
+  });
+
+  assert.equal(seenInputs.length, 4);
 });
 
 test.afterEach(() => {

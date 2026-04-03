@@ -5,6 +5,8 @@ const OFFSCREEN_DOCUMENT_PATH = 'src/offscreen/offscreen.html';
 const OFFSCREEN_JUSTIFICATION =
   'Run ONNX Runtime sentence-embedding inference in a DOM-capable extension page instead of the background service worker.';
 
+// Offscreen document creation is serialized so tab activity cannot race multiple
+// model runtimes into existence during the same session.
 let createDocumentPromise: Promise<void> | null = null;
 
 export type ClassificationContext = {
@@ -107,7 +109,10 @@ export async function requestMlClassification(
   context: ClassificationContext,
   appendDebugLog: (entry: DebugLogEntry) => Promise<void> | void,
 ): Promise<MlClassificationResult> {
+  // The background keeps consuming a `ready` vs `fallback` ML contract even
+  // though the underlying runtime has changed from TF.js to ONNX Runtime WASM.
   await ensureOffscreenDocument(appendDebugLog);
+  const startedAt = Date.now();
 
   const message: MlClassifyRequest & { type: 'ML_CLASSIFY_REQUEST' } = {
     goal: context.goal,
@@ -133,6 +138,7 @@ export async function requestMlClassification(
       cacheHit: response.cacheHit,
       metadata: {
         classification: classification ?? 'fallback',
+        classificationRequestDurationMs: Date.now() - startedAt,
         modelState: response.modelState,
         usedPageSignals: Boolean(context.pageSignals),
       },

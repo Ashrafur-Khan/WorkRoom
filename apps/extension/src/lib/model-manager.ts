@@ -6,6 +6,16 @@ type EmbeddingOutput = { data: Float32Array };
 type EmbeddingPipeline = (text: string, options?: Record<string, unknown>) => Promise<EmbeddingOutput>;
 
 const MODEL_DIRECTORY = 'assets/models/minilm';
+// `config.json` is a lightweight sentinel that proves the packaged model exists
+// without eagerly fetching the heavier ONNX weight file. The path must include
+// the HuggingFace model ID subdirectory because the build nests files there to
+// match the library's local path resolution: {localModelPath}/{modelId}/{file}.
+const MODEL_CONFIG_PATH = `${MODEL_DIRECTORY}/Xenova/all-MiniLM-L6-v2/config.json`;
+const ORT_ASSET_DIRECTORY = 'assets';
+const ORT_WASM_MODULE_PATH = `${ORT_ASSET_DIRECTORY}/ort-wasm-simd-threaded.jsep.mjs`;
+const ORT_WASM_BINARY_PATH = `${ORT_ASSET_DIRECTORY}/ort-wasm-simd-threaded.jsep.wasm`;
+// The response contract still exposes `backend` for background compatibility, even
+// though the offscreen runtime now only supports ONNX Runtime WASM.
 const BACKEND_NAME = 'wasm';
 
 type ModelManagerTestOverrides = {
@@ -61,6 +71,8 @@ export type MlDebugEvent = {
 };
 
 let pipelinePromise: Promise<EmbeddingPipeline> | null = null;
+// Goal and page embeddings stay in the offscreen document so the background worker
+// never owns ML state directly. They are cleared on explicit runtime teardown.
 const goalEmbeddingCache = new Map<string, number[]>();
 const pageEmbeddingCache = new Map<string, number[]>();
 let testOverrides: ModelManagerTestOverrides = {};
@@ -82,7 +94,14 @@ function createDebugEvent(
 }
 
 async function verifyAssetExists(path: string): Promise<void> {
-  const response = await fetch(toRuntimeUrl(path));
+  let response: Response;
+
+  try {
+    response = await fetch(toRuntimeUrl(path));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not fetch model asset ${path}: ${message}`);
+  }
 
   if (!response.ok) {
     throw new Error(`Missing asset: ${path}`);
@@ -98,6 +117,11 @@ async function ensureAssetExists(path: string): Promise<void> {
   await verifyAssetExists(path);
 }
 
+async function ensureRuntimeAssetsExist(): Promise<void> {
+  await ensureAssetExists(ORT_WASM_MODULE_PATH);
+  await ensureAssetExists(ORT_WASM_BINARY_PATH);
+}
+
 async function createLocalPipeline(): Promise<EmbeddingPipeline> {
   // Dynamic import: @huggingface/transformers is ESM-only; dynamic import
   // keeps the CJS test build working (tests inject createPipeline overrides).
@@ -109,7 +133,10 @@ async function createLocalPipeline(): Promise<EmbeddingPipeline> {
   hf.env.localModelPath = toRuntimeUrl(MODEL_DIRECTORY) + '/';
 
   if (hf.env.backends?.onnx?.wasm) {
-    hf.env.backends.onnx.wasm.wasmPaths = toRuntimeUrl('assets') + '/';
+    hf.env.backends.onnx.wasm.wasmPaths = {
+      mjs: toRuntimeUrl(ORT_WASM_MODULE_PATH),
+      wasm: toRuntimeUrl(ORT_WASM_BINARY_PATH),
+    };
   }
 
   const pipe = await hf.pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
@@ -122,13 +149,22 @@ async function loadModel(
   notifyDebug?: (event: MlDebugEvent) => void,
 ): Promise<EmbeddingPipeline> {
   notifyDebug?.(createDebugEvent('model-loading', { backend: BACKEND_NAME }));
+  const startedAt = Date.now();
 
-  await ensureAssetExists(MODEL_DIRECTORY);
+  await ensureAssetExists(MODEL_CONFIG_PATH);
+  await ensureRuntimeAssetsExist();
 
   const createFn = testOverrides.createPipeline ?? createLocalPipeline;
   const pipe = await createFn();
 
-  notifyDebug?.(createDebugEvent('model-ready', { backend: BACKEND_NAME }));
+  notifyDebug?.(
+    createDebugEvent('model-ready', {
+      backend: BACKEND_NAME,
+      metadata: {
+        loadDurationMs: Date.now() - startedAt,
+      },
+    }),
+  );
   return pipe;
 }
 
@@ -149,17 +185,30 @@ async function getCachedEmbedding(
   cache: Map<string, number[]>,
   key: string,
   text: string,
+  cacheName: 'goal' | 'page',
   notifyDebug?: (event: MlDebugEvent) => void,
   requestId?: string,
 ): Promise<{ cacheHit: boolean; embedding: number[] }> {
   const cached = cache.get(key);
 
   if (cached) {
-    notifyDebug?.(createDebugEvent('cache-hit', { cacheHit: true, requestId }));
+    notifyDebug?.(
+      createDebugEvent('cache-hit', {
+        cacheHit: true,
+        metadata: { cache: cacheName },
+        requestId,
+      }),
+    );
     return { cacheHit: true, embedding: cached };
   }
 
-  notifyDebug?.(createDebugEvent('cache-miss', { cacheHit: false, requestId }));
+  notifyDebug?.(
+    createDebugEvent('cache-miss', {
+      cacheHit: false,
+      metadata: { cache: cacheName },
+      requestId,
+    }),
+  );
 
   const pipe = await getModel(notifyDebug);
   const output = await pipe(text, { pooling: 'mean', normalize: true });
@@ -177,6 +226,8 @@ export async function classifyWithModel(
   request: MlClassifyRequest,
   notifyDebug?: (event: MlDebugEvent) => void,
 ): Promise<MlClassifyResponse> {
+  const startedAt = Date.now();
+
   try {
     const normalizedGoal = normalizeText(request.goal);
     const pageContext = buildNormalizedPageContext({
@@ -199,6 +250,7 @@ export async function classifyWithModel(
       goalEmbeddingCache,
       normalizedGoal,
       normalizedGoal,
+      'goal',
       notifyDebug,
       request.requestId,
     );
@@ -207,6 +259,7 @@ export async function classifyWithModel(
       pageEmbeddingCache,
       pageCacheKey,
       pageContext,
+      'page',
       notifyDebug,
       request.requestId,
     );
@@ -218,6 +271,9 @@ export async function classifyWithModel(
       createDebugEvent('classification-complete', {
         backend: BACKEND_NAME,
         cacheHit: goalResult.cacheHit && pageResult.cacheHit,
+        metadata: {
+          classificationDurationMs: Date.now() - startedAt,
+        },
         requestId: request.requestId,
         score,
       }),
@@ -237,6 +293,9 @@ export async function classifyWithModel(
       createDebugEvent('classification-fallback', {
         backend: BACKEND_NAME,
         error: message,
+        metadata: {
+          classificationDurationMs: Date.now() - startedAt,
+        },
         requestId: request.requestId,
       }),
     );
@@ -254,8 +313,7 @@ export async function classifyWithModel(
 export function resetModelManagerForTesting(): void {
   pipelinePromise = null;
   testOverrides = {};
-  goalEmbeddingCache.clear();
-  pageEmbeddingCache.clear();
+  clearModelCaches();
 }
 
 export function configureModelManagerForTesting(overrides: ModelManagerTestOverrides): void {
@@ -263,6 +321,8 @@ export function configureModelManagerForTesting(overrides: ModelManagerTestOverr
 }
 
 export function clearModelCaches(): void {
+  // Clearing both caches keeps the offscreen model lifetime explicit while
+  // leaving the background-facing ML contract unchanged.
   goalEmbeddingCache.clear();
   pageEmbeddingCache.clear();
 }
