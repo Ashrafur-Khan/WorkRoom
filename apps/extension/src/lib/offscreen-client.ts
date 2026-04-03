@@ -3,7 +3,7 @@ import type { MlClassifyRequest, MlClassifyResponse } from './model-manager';
 
 const OFFSCREEN_DOCUMENT_PATH = 'src/offscreen/offscreen.html';
 const OFFSCREEN_JUSTIFICATION =
-  'Run TensorFlow.js Universal Sentence Encoder inference in a DOM-capable extension page instead of the background service worker.';
+  'Run ONNX Runtime sentence-embedding inference in a DOM-capable extension page instead of the background service worker.';
 
 let createDocumentPromise: Promise<void> | null = null;
 

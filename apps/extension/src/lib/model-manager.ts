@@ -1,27 +1,15 @@
-import * as use from '@tensorflow-models/universal-sentence-encoder';
-import * as tf from '@tensorflow/tfjs';
-import '@tensorflow/tfjs-backend-cpu';
-import '@tensorflow/tfjs-backend-webgl';
-
 import type { Classification, PageSignals } from '../types';
 import { classifyCosineScore, cosineSimilarity, normalizeText } from './ml-helpers';
 import { buildNormalizedPageContext } from './page-signals';
 
-const MODEL_DIRECTORY = 'assets/models/use';
-const MODEL_URL = `${MODEL_DIRECTORY}/model.json`;
-const VOCAB_URL = `${MODEL_DIRECTORY}/vocab.json`;
+type EmbeddingOutput = { data: Float32Array };
+type EmbeddingPipeline = (text: string, options?: Record<string, unknown>) => Promise<EmbeddingOutput>;
 
-const BACKEND_PRIORITY = ['webgl', 'cpu'] as const;
-type SupportedBackend = (typeof BACKEND_PRIORITY)[number];
-type BackendDowngrade = {
-  from: SupportedBackend;
-  reason: string;
-};
+const MODEL_DIRECTORY = 'assets/models/minilm';
+const BACKEND_NAME = 'wasm';
+
 type ModelManagerTestOverrides = {
-  getBackend?: () => string;
-  loadModel?: typeof use.load;
-  ready?: typeof tf.ready;
-  setBackend?: typeof tf.setBackend;
+  createPipeline?: () => Promise<EmbeddingPipeline>;
   verifyAssetExists?: typeof verifyAssetExists;
 };
 
@@ -72,13 +60,9 @@ export type MlDebugEvent = {
   timestamp: number;
 };
 
-let backendPromise: Promise<SupportedBackend> | null = null;
-let modelPromise: Promise<use.UniversalSentenceEncoder> | null = null;
+let pipelinePromise: Promise<EmbeddingPipeline> | null = null;
 const goalEmbeddingCache = new Map<string, number[]>();
 const pageEmbeddingCache = new Map<string, number[]>();
-let selectedBackend: SupportedBackend | null = null;
-let lastAttemptedBackend: SupportedBackend | null = null;
-let backendDowngrade: BackendDowngrade | null = null;
 let testOverrides: ModelManagerTestOverrides = {};
 
 function toRuntimeUrl(path: string): string {
@@ -105,18 +89,6 @@ async function verifyAssetExists(path: string): Promise<void> {
   }
 }
 
-function getBackendName(): string {
-  return testOverrides.getBackend ? testOverrides.getBackend() : tf.getBackend();
-}
-
-async function setBackend(backend: SupportedBackend): Promise<boolean> {
-  return testOverrides.setBackend ? testOverrides.setBackend(backend) : tf.setBackend(backend);
-}
-
-async function waitForBackendReady(): Promise<void> {
-  return testOverrides.ready ? testOverrides.ready() : tf.ready();
-}
-
 async function ensureAssetExists(path: string): Promise<void> {
   if (testOverrides.verifyAssetExists) {
     await testOverrides.verifyAssetExists(path);
@@ -126,109 +98,51 @@ async function ensureAssetExists(path: string): Promise<void> {
   await verifyAssetExists(path);
 }
 
-async function loadUseModel(options: {
-  modelUrl: string;
-  vocabUrl: string;
-}): Promise<use.UniversalSentenceEncoder> {
-  return testOverrides.loadModel ? testOverrides.loadModel(options) : use.load(options);
-}
+async function createLocalPipeline(): Promise<EmbeddingPipeline> {
+  // Dynamic import: @huggingface/transformers is ESM-only; dynamic import
+  // keeps the CJS test build working (tests inject createPipeline overrides).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const hf: any = await import('@huggingface/transformers');
 
-function getBackendMetadata(): Record<string, string> | undefined {
-  if (!backendDowngrade) {
-    return undefined;
+  hf.env.allowRemoteModels = false;
+  hf.env.allowLocalModels = true;
+  hf.env.localModelPath = toRuntimeUrl(MODEL_DIRECTORY) + '/';
+
+  if (hf.env.backends?.onnx?.wasm) {
+    hf.env.backends.onnx.wasm.wasmPaths = toRuntimeUrl('assets') + '/';
   }
 
-  return {
-    downgradedFrom: backendDowngrade.from,
-    downgradeReason: backendDowngrade.reason,
-  };
-}
-
-function getResolvedBackend(): string {
-  return (selectedBackend ?? getBackendName()) || lastAttemptedBackend || 'unknown';
-}
-
-async function tryBackend(
-  backend: SupportedBackend,
-  notifyDebug?: (event: MlDebugEvent) => void,
-): Promise<SupportedBackend> {
-  lastAttemptedBackend = backend;
-  notifyDebug?.(createDebugEvent('model-loading', { backend }));
-
-  const didSwitch = await setBackend(backend);
-
-  if (!didSwitch) {
-    throw new Error(`TensorFlow.js backend '${backend}' was not available.`);
-  }
-
-  await waitForBackendReady();
-  selectedBackend = backend;
-  return backend;
-}
-
-async function ensureBackend(notifyDebug?: (event: MlDebugEvent) => void): Promise<SupportedBackend> {
-  if (!backendPromise) {
-    backendPromise = (async () => {
-      selectedBackend = null;
-      lastAttemptedBackend = null;
-      backendDowngrade = null;
-      let webglError: string | null = null;
-
-      try {
-        return await tryBackend('webgl', notifyDebug);
-      } catch (error) {
-        webglError = error instanceof Error ? error.message : String(error);
-      }
-
-      try {
-        const backend = await tryBackend('cpu', notifyDebug);
-        backendDowngrade = webglError ? { from: 'webgl', reason: webglError } : null;
-        return backend;
-      } catch (error) {
-        const cpuError = error instanceof Error ? error.message : String(error);
-        const attemptMessages = [
-          webglError ? `webgl: ${webglError}` : null,
-          `cpu: ${cpuError}`,
-        ].filter(Boolean);
-        throw new Error(`TensorFlow.js backend initialization failed. ${attemptMessages.join(' | ')}`);
-      }
-    })().catch((error) => {
-      backendPromise = null;
-      selectedBackend = null;
-      throw error;
-    });
-  }
-
-  return backendPromise;
-}
-
-async function loadModel(notifyDebug?: (event: MlDebugEvent) => void): Promise<use.UniversalSentenceEncoder> {
-  const backend = await ensureBackend(notifyDebug);
-  await Promise.all([ensureAssetExists(MODEL_URL), ensureAssetExists(VOCAB_URL)]);
-
-  const model = await loadUseModel({
-    modelUrl: toRuntimeUrl(MODEL_URL),
-    vocabUrl: toRuntimeUrl(VOCAB_URL),
+  const pipe = await hf.pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
+    local_files_only: true,
   });
-
-  notifyDebug?.(
-    createDebugEvent('model-ready', {
-      backend,
-      metadata: getBackendMetadata(),
-    }),
-  );
-  return model;
+  return pipe as EmbeddingPipeline;
 }
 
-async function getModel(notifyDebug?: (event: MlDebugEvent) => void): Promise<use.UniversalSentenceEncoder> {
-  if (!modelPromise) {
-    modelPromise = loadModel(notifyDebug).catch((error) => {
-      modelPromise = null;
+async function loadModel(
+  notifyDebug?: (event: MlDebugEvent) => void,
+): Promise<EmbeddingPipeline> {
+  notifyDebug?.(createDebugEvent('model-loading', { backend: BACKEND_NAME }));
+
+  await ensureAssetExists(MODEL_DIRECTORY);
+
+  const createFn = testOverrides.createPipeline ?? createLocalPipeline;
+  const pipe = await createFn();
+
+  notifyDebug?.(createDebugEvent('model-ready', { backend: BACKEND_NAME }));
+  return pipe;
+}
+
+async function getModel(
+  notifyDebug?: (event: MlDebugEvent) => void,
+): Promise<EmbeddingPipeline> {
+  if (!pipelinePromise) {
+    pipelinePromise = loadModel(notifyDebug).catch((error) => {
+      pipelinePromise = null;
       throw error;
     });
   }
 
-  return modelPromise;
+  return pipelinePromise;
 }
 
 async function getCachedEmbedding(
@@ -247,21 +161,16 @@ async function getCachedEmbedding(
 
   notifyDebug?.(createDebugEvent('cache-miss', { cacheHit: false, requestId }));
 
-  const model = await getModel(notifyDebug);
-  const embeddings = await model.embed([text]);
+  const pipe = await getModel(notifyDebug);
+  const output = await pipe(text, { pooling: 'mean', normalize: true });
+  const embedding = Array.from(output.data);
 
-  try {
-    const [embedding] = (await embeddings.array()) as number[][];
-
-    if (!embedding) {
-      throw new Error(`No embedding returned for key: ${key}`);
-    }
-
-    cache.set(key, embedding);
-    return { cacheHit: false, embedding };
-  } finally {
-    embeddings.dispose();
+  if (embedding.length === 0) {
+    throw new Error(`No embedding returned for key: ${key}`);
   }
+
+  cache.set(key, embedding);
+  return { cacheHit: false, embedding };
 }
 
 export async function classifyWithModel(
@@ -278,7 +187,7 @@ export async function classifyWithModel(
 
     if (!normalizedGoal || !pageContext) {
       return {
-        backend: getResolvedBackend(),
+        backend: BACKEND_NAME,
         cacheHit: false,
         error: 'Missing goal or page context for ML classification.',
         modelState: 'fallback',
@@ -306,17 +215,16 @@ export async function classifyWithModel(
     const classification = classifyCosineScore(score);
 
     notifyDebug?.(
-        createDebugEvent('classification-complete', {
-          backend: getResolvedBackend(),
-          cacheHit: goalResult.cacheHit && pageResult.cacheHit,
-          metadata: getBackendMetadata(),
-          requestId: request.requestId,
-          score,
-        }),
+      createDebugEvent('classification-complete', {
+        backend: BACKEND_NAME,
+        cacheHit: goalResult.cacheHit && pageResult.cacheHit,
+        requestId: request.requestId,
+        score,
+      }),
     );
 
     return {
-      backend: getResolvedBackend(),
+      backend: BACKEND_NAME,
       cacheHit: goalResult.cacheHit && pageResult.cacheHit,
       classification,
       modelState: 'ready',
@@ -327,14 +235,14 @@ export async function classifyWithModel(
 
     notifyDebug?.(
       createDebugEvent('classification-fallback', {
-        backend: getResolvedBackend(),
+        backend: BACKEND_NAME,
         error: message,
         requestId: request.requestId,
       }),
     );
 
     return {
-      backend: getResolvedBackend(),
+      backend: BACKEND_NAME,
       cacheHit: false,
       error: message,
       modelState: 'fallback',
@@ -344,11 +252,7 @@ export async function classifyWithModel(
 }
 
 export function resetModelManagerForTesting(): void {
-  backendPromise = null;
-  modelPromise = null;
-  selectedBackend = null;
-  lastAttemptedBackend = null;
-  backendDowngrade = null;
+  pipelinePromise = null;
   testOverrides = {};
   goalEmbeddingCache.clear();
   pageEmbeddingCache.clear();

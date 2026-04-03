@@ -7,7 +7,7 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
   - `allowedDomains` for "This is not a distraction!" overrides
   - `snoozedDomains` for temporary domain-level snoozes keyed to expiration timestamps
 - Session completion is driven by a Chrome alarm.
-- Classification is local-only and runs through TensorFlow.js + Universal Sentence Encoder in an offscreen document.
+- Classification is local-only and runs through `@huggingface/transformers` with the `Xenova/all-MiniLM-L6-v2` model in an offscreen document.
 - Classification now uses a two-stage local pipeline: cheap ML from URL/title context first, followed by conditional page-signal extraction for borderline results.
 - The background service worker remains the policy and enforcement layer.
 - When ML cannot produce a result, the background falls back to heuristics in `classifier.ts`.
@@ -20,9 +20,7 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - Chrome Extension Manifest V3
 - Background service worker
 - Vanilla popup and content UI
-- TensorFlow.js `3.21.0`
-- Universal Sentence Encoder `1.3.3`
-- TF.js WebGL backend with CPU fallback
+- `@huggingface/transformers` with `Xenova/all-MiniLM-L6-v2` (ONNX Runtime Web / WASM backend)
 - Chrome `offscreen` and `scripting` APIs
 
 ## Current Architecture
@@ -34,8 +32,8 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 | Security layer | `apps/extension/src/background/security.ts` | Applies classification results to badges, handles the borderline second-pass flow, honors active domain overrides/snoozes, blocks off-task tabs, and reinjects content scripts into already-open tabs when message delivery has no receiver. |
 | Classifier | `apps/extension/src/lib/classifier.ts` | Top-level decision layer. Returns structured classifier decisions, calls offscreen ML, logs fallback, and owns heuristic fallback policy. |
 | Offscreen bridge | `apps/extension/src/lib/offscreen-client.ts` | Creates/reuses the offscreen document and sends ML requests from background to offscreen. |
-| Offscreen runtime | `apps/extension/src/offscreen/*` | Offscreen document entrypoint that owns backend selection, TF.js/USE inference, and ML debug events. |
-| Model manager | `apps/extension/src/lib/model-manager.ts` | Offscreen-only TF.js setup, WebGL-first backend selection with CPU fallback, USE model loading, embedding cache keyed by normalized page context, and ML scoring. |
+| Offscreen runtime | `apps/extension/src/offscreen/*` | Offscreen document entrypoint that owns ONNX Runtime inference and ML debug events. |
+| Model manager | `apps/extension/src/lib/model-manager.ts` | Loads the MiniLM-L6-v2 pipeline via `@huggingface/transformers`, manages an embedding cache keyed by normalized page context, and produces ML scores. |
 | Page signals | `apps/extension/src/lib/page-signals.ts` | Extracts bounded page signals, builds canonical page context, and generates sanitized debug snapshots for second-pass classification. |
 | Content script | `apps/extension/src/content/*` | Shows the block overlay and session-complete toast inside the page, and answers `EXTRACT_PAGE_SIGNALS` with bounded DOM-derived signals. |
 | Debug log | `apps/extension/src/background/debug-log.ts` | Stores a bounded ring buffer of debug events in `chrome.storage.session`. |
@@ -43,8 +41,7 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 ## ML Flow
 1. The background sees a relevant tab event.
 2. `classifier.ts` requests Stage 1 ML classification through `offscreen-client.ts` using normalized URL/title context.
-3. The offscreen document selects a backend, preferring `webgl` and falling back to `cpu` if needed.
-4. The offscreen document loads or reuses TF.js + USE and returns either:
+3. The offscreen document loads or reuses the MiniLM-L6-v2 pipeline (ONNX Runtime Web / WASM) and returns either:
    - a `ready` result with `classification` and numeric `score`, or
    - a `fallback` result with `error` and `score: null`
 5. If the Stage 1 ML result is borderline, the background requests bounded page signals from the content script and reruns ML with richer page context.
@@ -57,7 +54,7 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 
 ## Runtime Notes
 - ML does not run in the service worker.
-- The offscreen document exists because TF.js/USE requires a DOM-capable extension page.
+- The offscreen document exists because ONNX Runtime Web requires a DOM-capable extension page.
 - The extension enables WASM for extension pages via:
   - `"content_security_policy": { "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" }`
 - Classification is privacy-preserving: no browsing data is sent to a remote service.
@@ -72,8 +69,7 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - Offscreen logs use `[WorkRoom:offscreen]`.
 - `GET_DEBUG_LOGS` returns recent debug entries from `chrome.storage.session`.
 - `classification-complete` logs include `modelState`, backend, and when available also `classification` or `error`.
-- `model-loading` / `model-ready` events reflect the actual backend attempt and the selected backend.
-- When WebGL fails and CPU is selected, offscreen debug metadata includes downgrade context.
+- `model-loading` / `model-ready` events reflect pipeline initialization. Backend is always `wasm`.
 - Signal extraction logs include:
   - `signal-extraction-started`
   - `signal-extraction-complete`
@@ -107,7 +103,9 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - The build script copies:
   - `apps/extension/manifest.json`
   - `apps/extension/workicon.png`
-  - vendored or downloaded USE model assets
+  - ONNX Runtime WASM files from `onnxruntime-web` into `dist/assets/`
+  - MiniLM-L6-v2 model files (config, tokenizer, quantized ONNX model) into `dist/assets/models/minilm/`
+  - To pre-vendor the model and avoid a network download at build time, place the model files in `apps/extension/ml/minilm/`
 
 ## Current Behavior
 - Starting a session triggers an immediate sweep across all open tabs.
@@ -145,7 +143,7 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 
 ## Project Status
 The extension is beyond the original heuristic-only prototype. It now has:
-- an offscreen ML pipeline using USE with WebGL-first backend selection and CPU fallback,
+- an offscreen ML pipeline using `@huggingface/transformers` (MiniLM-L6-v2 / ONNX Runtime Web),
 - background-owned heuristic fallback policy,
 - reinjection-based recovery for blocking already-open off-task tabs,
 - session-scoped domain override and snooze controls in the block overlay,

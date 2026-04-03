@@ -29,27 +29,16 @@ function installAssetFetchStub() {
   global.fetch = async () => ({ ok: true });
 }
 
-function createEmbeddingTensor(embedding) {
-  return {
-    async array() {
-      return [embedding];
-    },
-    dispose() {},
+function mockPipeline(embeddingsByInput) {
+  return async () => async (text) => {
+    const embedding = embeddingsByInput[text];
+
+    if (!embedding) {
+      throw new Error(`Missing mock embedding for input: ${text}`);
+    }
+
+    return { data: new Float32Array(embedding) };
   };
-}
-
-function mockUseModel(embeddingsByInput) {
-  return async () => ({
-    async embed([text]) {
-      const embedding = embeddingsByInput[text];
-
-      if (!embedding) {
-        throw new Error(`Missing mock embedding for input: ${text}`);
-      }
-
-      return createEmbeddingTensor(embedding);
-    },
-  });
 }
 
 test('normalizeText collapses punctuation and casing', () => {
@@ -198,12 +187,11 @@ test('background heuristic does not force youtube off-task during ML fallback', 
   assert.equal(result.source, 'heuristic');
 });
 
-test('classifyWithModel returns fallback response if tf runtime fails', async () => {
+test('classifyWithModel returns fallback response if pipeline init fails', async () => {
   installChromeRuntime();
   configureModelManagerForTesting({
-    getBackend: () => '',
-    ready: async () => undefined,
-    setBackend: async () => false,
+    createPipeline: async () => { throw new Error('Pipeline initialization failed'); },
+    verifyAssetExists: async () => undefined,
   });
 
   const result = await classifyWithModel({
@@ -216,27 +204,17 @@ test('classifyWithModel returns fallback response if tf runtime fails', async ()
   assert.equal(result.modelState, 'fallback');
   assert.equal(result.score, null);
   assert.equal(typeof result.error, 'string');
-  assert.match(result.error, /backend initialization failed/i);
+  assert.match(result.error, /pipeline initialization failed/i);
 });
 
-test('classifyWithModel prefers the webgl backend when available', async () => {
+test('classifyWithModel loads pipeline and classifies correctly', async () => {
   installChromeRuntime();
 
-  const backendAttempts = [];
-  let activeBackend = 'cpu';
-
   configureModelManagerForTesting({
-    getBackend: () => activeBackend,
-    loadModel: mockUseModel({
+    createPipeline: mockPipeline({
       'study calculus': [1, 0, 0],
       'calculus lecture notes example': [1, 0, 0],
     }),
-    ready: async () => undefined,
-    setBackend: async (backend) => {
-      backendAttempts.push(backend);
-      activeBackend = backend;
-      return backend === 'webgl';
-    },
     verifyAssetExists: async () => undefined,
   });
 
@@ -244,70 +222,50 @@ test('classifyWithModel prefers the webgl backend when available', async () => {
   const result = await classifyWithModel(
     {
       goal: 'Study calculus',
-      requestId: 'req-webgl',
+      requestId: 'req-pipeline',
       title: 'Calculus lecture notes',
       url: 'https://example.edu/calculus',
     },
     (event) => debugEvents.push(event),
   );
 
-  assert.deepEqual(backendAttempts, ['webgl']);
   assert.equal(result.modelState, 'ready');
-  assert.equal(result.backend, 'webgl');
+  assert.equal(result.backend, 'wasm');
   assert.equal(result.classification, 'on-task');
   assert.equal(debugEvents.at(-1)?.status, 'classification-complete');
-  assert.equal(debugEvents.at(-1)?.backend, 'webgl');
+  assert.equal(debugEvents.at(-1)?.backend, 'wasm');
 });
 
-test('classifyWithModel falls back to cpu when webgl initialization fails', async () => {
+test('classifyWithModel reuses cached pipeline across calls', async () => {
   installChromeRuntime();
 
-  const backendAttempts = [];
-  let activeBackend = 'cpu';
+  let createCount = 0;
 
   configureModelManagerForTesting({
-    getBackend: () => activeBackend,
-    loadModel: mockUseModel({
-      'study calculus': [1, 0, 0],
-      'calculus lecture notes example': [1, 0, 0],
-    }),
-    ready: async () => undefined,
-    setBackend: async (backend) => {
-      backendAttempts.push(backend);
-
-      if (backend === 'webgl') {
-        throw new Error('WebGL context creation failed');
-      }
-
-      activeBackend = backend;
-      return backend === 'cpu';
+    createPipeline: async () => {
+      createCount++;
+      return async (text) => ({
+        data: new Float32Array([1, 0, 0]),
+      });
     },
     verifyAssetExists: async () => undefined,
   });
 
-  const debugEvents = [];
-  const result = await classifyWithModel(
-    {
-      goal: 'Study calculus',
-      requestId: 'req-cpu',
-      title: 'Calculus lecture notes',
-      url: 'https://example.edu/calculus',
-    },
-    (event) => debugEvents.push(event),
-  );
+  await classifyWithModel({
+    goal: 'Study calculus',
+    requestId: 'req-a',
+    title: 'Calculus lecture notes',
+    url: 'https://example.edu/calculus',
+  });
 
-  assert.deepEqual(backendAttempts, ['webgl', 'cpu']);
-  assert.equal(result.modelState, 'ready');
-  assert.equal(result.backend, 'cpu');
-  assert.equal(result.classification, 'on-task');
-  assert.deepEqual(
-    debugEvents
-      .filter((event) => event.status === 'model-loading')
-      .map((event) => event.backend),
-    ['webgl', 'cpu'],
-  );
-  assert.equal(debugEvents.at(-1)?.metadata?.downgradedFrom, 'webgl');
-  assert.match(debugEvents.at(-1)?.metadata?.downgradeReason ?? '', /context creation failed/i);
+  await classifyWithModel({
+    goal: 'Study calculus',
+    requestId: 'req-b',
+    title: 'Calculus lecture notes',
+    url: 'https://example.edu/calculus',
+  });
+
+  assert.equal(createCount, 1);
 });
 
 test.afterEach(() => {
