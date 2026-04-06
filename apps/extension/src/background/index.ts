@@ -158,6 +158,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'STOP_SESSION') {
     void (async () => {
       await appendDebugLog(createDebugEntry('session-stopped'));
+      await chrome.storage.local.set({ sessionState: createIdleState() });
       // Manual stop follows the same offscreen teardown path as alarm-driven
       // completion so model caches do not leak across sessions.
       await closeOffscreenDocument(appendDebugLog);

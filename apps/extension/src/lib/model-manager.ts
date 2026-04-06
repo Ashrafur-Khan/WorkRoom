@@ -130,6 +130,7 @@ async function createLocalPipeline(): Promise<EmbeddingPipeline> {
 
   hf.env.allowRemoteModels = false;
   hf.env.allowLocalModels = true;
+  hf.env.useBrowserCache = false;
   hf.env.localModelPath = toRuntimeUrl(MODEL_DIRECTORY) + '/';
 
   if (hf.env.backends?.onnx?.wasm) {

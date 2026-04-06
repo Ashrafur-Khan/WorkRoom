@@ -719,3 +719,194 @@ test('runSecurityCheckForState drops stale classification results when the tab n
   assert.equal(calls.debugEntries.at(-1)?.status, 'classification-skipped');
   assert.equal(calls.debugEntries.at(-1)?.metadata?.reason, 'stale-tab');
 });
+
+test('runSecurityCheckForState drops classification results when the tab lookup fails', async () => {
+  const calls = {
+    badgeText: [],
+    debugEntries: [],
+  };
+
+  await runSecurityCheckForState(
+    29,
+    'https://example.com/original',
+    'Original',
+    createRunningState(),
+    {
+      appendDebugLog: async (entry) => {
+        calls.debugEntries.push(entry);
+      },
+      classify: async () => ({ classification: 'off-task', score: 0.1, source: 'ml', usedPageSignals: false }),
+      requestMlClassification: async () => {
+        throw new Error('requestMlClassification should not be called');
+      },
+      actionApi: {
+        setBadgeText(details) {
+          calls.badgeText.push(details);
+        },
+        setBadgeBackgroundColor() {
+          throw new Error('setBadgeBackgroundColor should not be called');
+        },
+      },
+      tabsApi: {
+        async get() {
+          throw new Error('Tab was closed');
+        },
+        async sendMessage() {
+          throw new Error('sendMessage should not be called');
+        },
+        async query() {
+          return [];
+        },
+      },
+      scriptingApi: {
+        async executeScript() {
+          throw new Error('executeScript should not be called');
+        },
+        async insertCSS() {
+          throw new Error('insertCSS should not be called');
+        },
+      },
+      storageApi: {
+        async set() {
+          throw new Error('storageApi.set should not be called');
+        },
+      },
+    },
+  );
+
+  assert.deepEqual(calls.badgeText, []);
+  assert.equal(calls.debugEntries.at(-1)?.status, 'classification-skipped');
+  assert.equal(calls.debugEntries.at(-1)?.metadata?.reason, 'tab-unavailable');
+});
+
+test('runSecurityCheckForState falls back cleanly when restricted pages cannot provide page signals', async () => {
+  const calls = {
+    debugEntries: [],
+    executeScript: [],
+    messages: [],
+  };
+
+  await runSecurityCheckForState(
+    30,
+    'chrome://extensions',
+    'Extensions',
+    createRunningState(),
+    {
+      appendDebugLog: async (entry) => {
+        calls.debugEntries.push(entry);
+      },
+      classify: async (_url, _title, _goal, context) => {
+        if (context.pageSignals) {
+          throw new Error('classify should not be retried with page signals on restricted pages');
+        }
+
+        return { classification: 'ambiguous', score: 0.45, source: 'ml', usedPageSignals: false };
+      },
+      requestMlClassification: async () => {
+        throw new Error('requestMlClassification should not be called');
+      },
+      actionApi: {
+        setBadgeText() {},
+        setBadgeBackgroundColor() {},
+      },
+      tabsApi: {
+        async get(tabId) {
+          return { id: tabId, url: 'chrome://extensions' };
+        },
+        async sendMessage(tabId, message) {
+          calls.messages.push({ tabId, message });
+          throw new Error('Could not establish connection. Receiving end does not exist.');
+        },
+        async query() {
+          return [];
+        },
+      },
+      scriptingApi: {
+        async executeScript(details) {
+          calls.executeScript.push(details);
+        },
+        async insertCSS() {
+          throw new Error('insertCSS should not be called');
+        },
+      },
+      storageApi: {
+        async set() {
+          throw new Error('storageApi.set should not be called');
+        },
+      },
+    },
+  );
+
+  assert.equal(calls.messages.length, 1);
+  assert.deepEqual(calls.executeScript, []);
+  assert.equal(calls.debugEntries.some((entry) => entry.status === 'signal-extraction-fallback'), true);
+  assert.equal(
+    calls.debugEntries.find((entry) => entry.status === 'signal-extraction-fallback')?.metadata?.reason,
+    'restricted-url',
+  );
+});
+
+test('runSecurityCheckForState falls back to the stage-one decision when page signal extraction times out', async () => {
+  const calls = {
+    badgeText: [],
+    debugEntries: [],
+  };
+
+  await runSecurityCheckForState(
+    31,
+    'https://example.com/article',
+    'Focus article',
+    createRunningState(),
+    {
+      appendDebugLog: async (entry) => {
+        calls.debugEntries.push(entry);
+      },
+      classify: async (_url, _title, _goal, context) => {
+        if (context.pageSignals) {
+          throw new Error('classify should not be retried after a timeout');
+        }
+
+        return { classification: 'ambiguous', score: 0.45, source: 'ml', usedPageSignals: false };
+      },
+      requestMlClassification: async () => {
+        throw new Error('requestMlClassification should not be called');
+      },
+      actionApi: {
+        setBadgeText(details) {
+          calls.badgeText.push(details);
+        },
+        setBadgeBackgroundColor() {
+          throw new Error('setBadgeBackgroundColor should not be called');
+        },
+      },
+      tabsApi: {
+        async get(tabId) {
+          return { id: tabId, url: 'https://example.com/article' };
+        },
+        async sendMessage() {
+          return new Promise(() => undefined);
+        },
+        async query() {
+          return [];
+        },
+      },
+      scriptingApi: {
+        async executeScript() {
+          throw new Error('executeScript should not be called');
+        },
+        async insertCSS() {
+          throw new Error('insertCSS should not be called');
+        },
+      },
+      storageApi: {
+        async set() {
+          throw new Error('storageApi.set should not be called');
+        },
+      },
+    },
+  );
+
+  assert.deepEqual(calls.badgeText, [{ text: '', tabId: 31 }]);
+  assert.equal(calls.debugEntries.some((entry) => entry.status === 'signal-extraction-timeout'), true);
+  assert.equal(calls.debugEntries.at(-1)?.status, 'classification-complete');
+});

@@ -73,6 +73,13 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - `classification-complete` logs include `modelState`, backend, and when available also `classification` or `error`.
 - `classification-complete` and `classification-fallback` include timing metadata for classification work.
 - `model-loading` / `model-ready` events reflect pipeline initialization. Backend is always `wasm`, and `model-ready` includes load timing metadata.
+- Offscreen lifecycle logs now distinguish:
+  - `offscreen-created` when the document is created for the current request flow
+  - `offscreen-reused` when an existing offscreen runtime is reused
+  - `offscreen-close-skipped` when teardown is requested but no offscreen document exists
+  - `offscreen-close-message-failed` when the teardown ping fails but document closure continues
+  - `offscreen-request-failed` when the runtime message transport fails before a response is received
+  - `offscreen-response-invalid` when the offscreen runtime returns no response or a malformed payload
 - If model preflight fails before pipeline creation, the fallback error now includes the exact asset path, such as `assets/models/minilm/Xenova/all-MiniLM-L6-v2/config.json`, instead of only reporting `Failed to fetch`.
 - If ONNX Runtime asset preflight fails before pipeline creation, the fallback error includes the exact missing runtime path, such as `assets/ort-wasm-simd-threaded.jsep.mjs`.
 - Signal extraction logs include:
@@ -102,6 +109,19 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
    - `npm run build:extension`
 5. Run tests:
    - `npm test`
+
+## Stage 2 Manual QA Checklist
+- Start a session and confirm already-open tabs are classified immediately.
+- Stop a session and verify badges clear, blocked pages recover, and the offscreen runtime tears down cleanly.
+- Let a session finish via alarm and verify teardown plus the completion notification/toast flow.
+- Reload the extension during an active session and confirm classification recovers on the next relevant tab event.
+- Verify off-task blocking on a normal page with a live content script receiver.
+- Verify off-task blocking on an already-open page that requires content-script reinjection.
+- Verify restricted URLs such as `chrome://extensions` are badged safely without attempted injection.
+- Exercise a borderline page and confirm second-pass page-signal extraction can refine the decision.
+- Exercise a page where second-pass extraction is unavailable, sparse, or times out and confirm the Stage 1 result still applies cleanly.
+- Verify "This is not a distraction" applies immediately to the current domain for the rest of the session.
+- Verify 5/10/15 minute snoozes unblock immediately, expire correctly, and return the tab to normal enforcement afterward.
 
 ## Build Notes
 - Dist artifacts are generated into `apps/extension/dist`.
