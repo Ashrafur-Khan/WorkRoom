@@ -6,8 +6,8 @@
   "scripts": {
     "test": "node apps/extension/scripts/run-tests.mjs",
     "dev:extension": "vite --config apps/extension/vite.config.ts",
-    "build:extension": "node apps/extension/scripts/build-extension.mjs"
-
+    "build:extension": "node apps/extension/scripts/build-extension.mjs",
+    "threshold:calibrate": "node apps/extension/scripts/threshold-harness.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.4.0"

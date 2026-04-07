@@ -13,12 +13,24 @@ const HOSTNAME_STOP_WORDS = new Set([
   'dev',
 ]);
 
+// Thresholds calibrated 2026-04-07 against 43 labeled (goal, title+URL) pairs
+// spanning 5 goal types via apps/extension/scripts/threshold-harness.mjs.
+//
+// Score distribution (Stage 1: title + hostname tokens only):
+//   on-task  (n=19): min=0.02  median=0.42  max=0.93
+//   off-task (n=17): min=-0.09 median=0.08  max=0.13 (clear), 0.49 (tricky keyword overlap)
+//   borderline (n=7): min=0.11  median=0.20  max=0.42
+//
+// Clear on/off-task pairs separate cleanly (gap: 0.31–0.13 = 0.18).
+// Tricky off-task pairs with keyword overlap (e.g. "r/biology" vs "biology exam")
+// score 0.43–0.49 and leak into on-task — a Stage 1 limitation that Stage 2
+// DOM signals can address. See threshold-harness output for full details.
 export const ML_THRESHOLDS = {
-  onTask: 0.57,
-  offTask: 0.32,
+  onTask: 0.30,
+  offTask: 0.15,
 } as const;
 
-export const ML_BORDERLINE_WINDOW = 0.05;
+export const ML_BORDERLINE_WINDOW = 0.04;
 
 export function normalizeText(input: string): string {
   return input

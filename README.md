@@ -11,6 +11,7 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - Classification now uses a two-stage local pipeline: cheap ML from URL/title context first, followed by conditional page-signal extraction for borderline results.
 - The background service worker remains the policy and enforcement layer.
 - When ML cannot produce a result, the background falls back to heuristics in `classifier.ts`.
+- The packaged model/runtime path is local-only: MiniLM model assets and ONNX Runtime web assets are bundled into the extension and loaded from `chrome-extension://` URLs.
 - Already-open tabs can now be blocked even after extension reload or late activation because the background can reinject the content script and retry delivery when a tab has no receiver.
 - Users can override an off-task block for the current session or snooze it for `5`, `10`, or `15` minutes on the current domain.
 
@@ -31,9 +32,9 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 | Background | `apps/extension/src/background/index.ts` | Main orchestrator for alarms, tab updates, tab activation, runtime messages, debug-log retrieval, and session-scoped domain override updates. |
 | Security layer | `apps/extension/src/background/security.ts` | Applies classification results to badges, handles the borderline second-pass flow, honors active domain overrides/snoozes, blocks off-task tabs, and reinjects content scripts into already-open tabs when message delivery has no receiver. |
 | Classifier | `apps/extension/src/lib/classifier.ts` | Top-level decision layer. Returns structured classifier decisions, calls offscreen ML, logs fallback, and owns heuristic fallback policy. |
-| Offscreen bridge | `apps/extension/src/lib/offscreen-client.ts` | Creates/reuses the offscreen document and sends ML requests from background to offscreen. |
+| Offscreen bridge | `apps/extension/src/lib/offscreen-client.ts` | Serializes offscreen create/close operations, creates or reuses the offscreen document, validates ML responses, and sends ML requests from background to offscreen. |
 | Offscreen runtime | `apps/extension/src/offscreen/*` | Offscreen document entrypoint that owns ONNX Runtime inference and ML debug events. |
-| Model manager | `apps/extension/src/lib/model-manager.ts` | Loads the MiniLM-L6-v2 pipeline via `@huggingface/transformers`, preflights the packaged model and ONNX Runtime assets, manages offscreen embedding caches keyed by normalized page context, and produces ML scores. |
+| Model manager | `apps/extension/src/lib/model-manager.ts` | Loads the MiniLM-L6-v2 pipeline via `@huggingface/transformers`, preflights the packaged model and ONNX Runtime assets, disables browser Cache API usage for extension-packaged model files, manages offscreen embedding caches keyed by normalized page context, and produces ML scores. |
 | Page signals | `apps/extension/src/lib/page-signals.ts` | Extracts bounded page signals, builds canonical page context, and generates sanitized debug snapshots for second-pass classification. |
 | Content script | `apps/extension/src/content/*` | Shows the block overlay and session-complete toast inside the page, and answers `EXTRACT_PAGE_SIGNALS` with bounded DOM-derived signals. |
 | Debug log | `apps/extension/src/background/debug-log.ts` | Stores a bounded ring buffer of debug events in `chrome.storage.session`. |
@@ -55,8 +56,11 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 ## Runtime Notes
 - ML does not run in the service worker.
 - The offscreen document exists because ONNX Runtime Web requires a DOM-capable extension page.
+- `@huggingface/transformers` is configured for local-only loading: remote model fetches are disabled, local model loading is enabled, and the model path points at the packaged extension assets.
 - Before pipeline initialization, the offscreen runtime verifies that `assets/models/minilm/Xenova/all-MiniLM-L6-v2/config.json` is fetchable. This is a lightweight packaged-model sentinel used to fail fast with a precise asset-path error if the model bundle is missing or unreadable.
 - Before pipeline initialization, the offscreen runtime also verifies that the packaged ONNX Runtime loader and WASM files are fetchable, so missing ORT assets fail with a precise extension-path error instead of a generic backend-init failure.
+- Browser Cache API usage is disabled for packaged `chrome-extension://` model assets to avoid unsupported cache writes from the transformers runtime.
+- The runtime currently relies on the library-default WASM dtype selection. Since no explicit `dtype` is configured, Transformers.js will choose its default WASM dtype for the model.
 - The extension enables WASM for extension pages via:
   - `"content_security_policy": { "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" }`
 - Classification is privacy-preserving: no browsing data is sent to a remote service.
@@ -109,6 +113,8 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
    - `npm run build:extension`
 5. Run tests:
    - `npm test`
+6. Run threshold calibration harness (downloads model on first run):
+   - `npm run threshold:calibrate`
 
 ## Stage 2 Manual QA Checklist
 - Start a session and confirm already-open tabs are classified immediately.
@@ -136,10 +142,12 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 
 ## Current Behavior
 - Starting a session triggers an immediate sweep across all open tabs.
+- Both manual stop and alarm-driven completion reset session state, clear badges, and tear down the offscreen runtime so model caches do not leak across sessions.
 - `on-task` tabs get a green badge.
 - `off-task` tabs get a red badge and a `BLOCK_PAGE` message to the content script.
 - Borderline ML results can trigger a second pass using bounded DOM-derived page signals before the final decision is applied.
 - If an already-open off-task tab has no content-script receiver, the background injects the content script and CSS into that tab and retries the block once.
+- If a page cannot host injected scripts, the extension can still classify and badge it, but blocking is skipped cleanly and logged as a restricted URL path.
 - Blocked pages now show three recovery paths:
   - go back immediately
   - mark the current domain as "not a distraction" for the rest of the session
@@ -148,7 +156,8 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - `ambiguous` tabs clear the badge.
 - The content script shows a full-page overlay for blocked pages, removes the overlay when the user allows or snoozes the domain, and shows a toast when the session ends.
 - Heuristic fallback still exists and is intentionally simple: domain allow/block lists plus title keyword matching against the user goal.
-- If a tab navigates while classification is in flight, the background discards the stale result instead of applying it to the new page.
+- If second-pass page-signal extraction fails because of timeout, sparse signals, restricted URLs, missing receivers, reinjection failure, or tab loss, the extension falls back to the Stage 1 decision without breaking the flow.
+- If a tab navigates while classification is in flight, or the tab disappears before enforcement, the background discards the stale result instead of applying it to the wrong page.
 
 ## Known Limitations
 - Some browser-owned or restricted pages cannot be script-injected, so they can be classified and badged but not overlaid.
@@ -156,7 +165,8 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - Session overrides and snoozes are temporary only; there is no permanent user-managed allowlist yet.
 - Heuristic fallback is intentionally simple and title/domain based.
 - The extension still relies on content-script availability for richer second-pass page understanding and for page overlays on off-task tabs.
-- The extension has unit coverage for core classifier and security flows, but it does not yet have browser-level end-to-end coverage.
+- ML classification thresholds were calibrated against a labeled evaluation set of 43 (goal, title+URL) pairs. The calibration harness and labeled pairs live in `apps/extension/scripts/threshold-harness.mjs` and `apps/extension/src/__tests__/threshold-pairs.ts`. Tricky off-task pairs with keyword overlap (e.g. "r/biology" vs a biology study goal) can still leak through Stage 1; this is a known limitation of title-only context that Stage 2 DOM signals can address.
+- The extension has unit coverage for classifier, security, page-signal extraction, build/runtime asset validation, and offscreen-client lifecycle/error handling, but it does not yet have browser-level end-to-end coverage.
 - The README may lag behind active development; the codebase is the source of truth.
 
 ## Important Files
@@ -175,6 +185,7 @@ The extension is beyond the original heuristic-only prototype. It now has:
 - reinjection-based recovery for blocking already-open off-task tabs,
 - session-scoped domain override and snooze controls in the block overlay,
 - bounded debug-log storage for background and offscreen events, and
-- unit coverage for the main classifier, backend-selection, and security/blocking flows.
+- unit coverage for classifier, security/blocking, page-signal extraction, build/runtime asset validation, and offscreen-client lifecycle/error flows, and
+- empirically calibrated ML thresholds with a labeled evaluation set and scoring harness.
 
 There is still a lot I have to do. The extension is still a bit slow, and the main remaining work before broad public release is product hardening rather than core capability: privacy/disclosure materials, broader manual QA across sites, and end-to-end validation of real browser flows.
