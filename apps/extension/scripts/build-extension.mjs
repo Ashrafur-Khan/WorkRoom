@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   writeFileSync,
 } from 'node:fs';
@@ -20,18 +21,22 @@ const repoRoot = resolve(__dirname, '..', '..', '..');
 const extensionRoot = resolve(repoRoot, 'apps/extension');
 const distRoot = resolve(extensionRoot, 'dist');
 const distAssetsRoot = resolve(distRoot, 'assets');
-const vendoredUseAssetsRoot = resolve(extensionRoot, 'ml/use');
+const vendoredMiniLmRoot = resolve(extensionRoot, 'ml/minilm');
 
-const USE_MODEL_SOURCE =
-  'https://storage.googleapis.com/tfjs-models/savedmodel/universal_sentence_encoder/model.json';
-const USE_VOCAB_SOURCE =
-  'https://storage.googleapis.com/tfjs-models/savedmodel/universal_sentence_encoder/vocab.json';
-
-const wasmFiles = [
-  'tfjs-backend-wasm.wasm',
-  'tfjs-backend-wasm-simd.wasm',
-  'tfjs-backend-wasm-threaded-simd.wasm',
+const HF_MODEL_REPO = 'Xenova/all-MiniLM-L6-v2';
+const HF_MODEL_FILES = [
+  'config.json',
+  'tokenizer.json',
+  'tokenizer_config.json',
+  'onnx/model_quantized.onnx',
 ];
+export const REQUIRED_ORT_RUNTIME_ASSETS = [
+  'ort-wasm-simd-threaded.jsep.mjs',
+  'ort-wasm-simd-threaded.jsep.wasm',
+  'ort-wasm-simd-threaded.mjs',
+  'ort-wasm-simd-threaded.wasm',
+];
+const ORT_RUNTIME_ASSET_PATTERN = /^ort-wasm.*\.(?:mjs|wasm)$/;
 
 async function ensureDirectory(path) {
   mkdirSync(path, { recursive: true });
@@ -117,27 +122,40 @@ async function copyStaticAssets() {
   copyFileSync(resolve(extensionRoot, 'workicon.png'), resolve(distRoot, 'workicon.png'));
 }
 
-async function copyWasmAssets() {
-  const packageRoot = dirname(require.resolve('@tensorflow/tfjs-backend-wasm/package.json'));
+export function getRequiredOnnxRuntimeAssets(fileNames) {
+  return fileNames.filter((fileName) => ORT_RUNTIME_ASSET_PATTERN.test(fileName)).sort();
+}
 
-  await ensureDirectory(distAssetsRoot);
+export function validateOnnxRuntimeAssetSet(fileNames) {
+  const missingFiles = REQUIRED_ORT_RUNTIME_ASSETS.filter((fileName) => !fileNames.includes(fileName));
 
-  for (const fileName of wasmFiles) {
-    copyFileSync(resolve(packageRoot, 'dist', fileName), resolve(distAssetsRoot, fileName));
+  if (missingFiles.length > 0) {
+    throw new Error(
+      `Missing required ONNX Runtime web assets: ${missingFiles.join(', ')}`,
+    );
   }
 }
 
-async function downloadJson(url) {
-  const response = await fetch(url);
+async function copyOnnxRuntimeAssets() {
+  const onnxDistRoot = dirname(require.resolve('onnxruntime-web'));
 
-  if (!response.ok) {
-    throw new Error(`Failed to download ${url}: ${response.status} ${response.statusText}`);
+  await ensureDirectory(distAssetsRoot);
+
+  const runtimeFiles = getRequiredOnnxRuntimeAssets(readdirSync(onnxDistRoot));
+
+  validateOnnxRuntimeAssetSet(runtimeFiles);
+
+  for (const fileName of runtimeFiles) {
+    copyFileSync(resolve(onnxDistRoot, fileName), resolve(distAssetsRoot, fileName));
+  }
+}
+
+export function validateDistOnnxRuntimeAssets() {
+  if (!existsSync(distAssetsRoot)) {
+    throw new Error(`Missing dist assets directory: ${distAssetsRoot}`);
   }
 
-  return {
-    json: await response.json(),
-    resolvedUrl: response.url,
-  };
+  validateOnnxRuntimeAssetSet(readdirSync(distAssetsRoot));
 }
 
 async function downloadFile(url, destinationPath) {
@@ -152,41 +170,34 @@ async function downloadFile(url, destinationPath) {
   writeFileSync(destinationPath, fileBuffer);
 }
 
-async function copyVendoredUseAssets(destinationRoot) {
-  if (!existsSync(vendoredUseAssetsRoot)) {
+async function copyVendoredMiniLmAssets(destinationRoot) {
+  if (!existsSync(vendoredMiniLmRoot)) {
     return false;
   }
 
-  await cp(vendoredUseAssetsRoot, destinationRoot, { recursive: true });
+  await cp(vendoredMiniLmRoot, destinationRoot, { recursive: true });
   return true;
 }
 
-async function downloadUseAssets(destinationRoot) {
-  const { json: modelJson, resolvedUrl } = await downloadJson(USE_MODEL_SOURCE);
-  const resolvedModelUrl = new URL(resolvedUrl);
-  const baseModelUrl = new URL('./', resolvedModelUrl);
-
-  writeFileSync(resolve(destinationRoot, 'model.json'), JSON.stringify(modelJson, null, 2));
-  await downloadFile(USE_VOCAB_SOURCE, resolve(destinationRoot, 'vocab.json'));
-
-  const shardPaths = modelJson.weightsManifest.flatMap((entry) => entry.paths);
-
-  await Promise.all(
-    shardPaths.map((relativePath) =>
-      downloadFile(new URL(relativePath, baseModelUrl).toString(), resolve(destinationRoot, relativePath)),
-    ),
-  );
+async function downloadMiniLmAssets(destinationRoot) {
+  for (const filePath of HF_MODEL_FILES) {
+    const url = `https://huggingface.co/${HF_MODEL_REPO}/resolve/main/${filePath}`;
+    await downloadFile(url, resolve(destinationRoot, filePath));
+  }
 }
 
-async function ensureUseAssets() {
-  const destinationRoot = resolve(distAssetsRoot, 'models/use');
+async function ensureMiniLmAssets() {
+  // Nest under the HuggingFace model ID so the runtime path matches what
+  // @huggingface/transformers resolves: {localModelPath}/{modelId}/{file}.
+  const destinationRoot = resolve(distAssetsRoot, 'models/minilm', HF_MODEL_REPO);
   await ensureDirectory(destinationRoot);
+  await ensureDirectory(resolve(destinationRoot, 'onnx'));
 
-  if (await copyVendoredUseAssets(destinationRoot)) {
+  if (await copyVendoredMiniLmAssets(destinationRoot)) {
     return;
   }
 
-  await downloadUseAssets(destinationRoot);
+  await downloadMiniLmAssets(destinationRoot);
 }
 
 async function main() {
@@ -194,11 +205,14 @@ async function main() {
   normalizeContentStyleAsset();
   validateContentScriptBundle();
   await copyStaticAssets();
-  await copyWasmAssets();
-  await ensureUseAssets();
+  await copyOnnxRuntimeAssets();
+  await ensureMiniLmAssets();
+  validateDistOnnxRuntimeAssets();
 }
 
-main().catch((error) => {
-  console.error('[WorkRoom] Extension build failed:', error);
-  process.exitCode = 1;
-});
+if (process.argv[1] === __filename) {
+  main().catch((error) => {
+    console.error('[WorkRoom] Extension build failed:', error);
+    process.exitCode = 1;
+  });
+}

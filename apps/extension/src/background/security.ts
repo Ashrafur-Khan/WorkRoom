@@ -319,6 +319,18 @@ async function requestPageSignals(
       return null;
     }
 
+    if (isMissingReceiverError(extractionError) && !isInjectableUrl(url)) {
+      await dependencies.appendDebugLog(
+        createDebugEntry('signal-extraction-fallback', {
+          error: extractionError,
+          metadata: { reason: 'restricted-url', url },
+          requestId,
+          tabId,
+        }),
+      );
+      return null;
+    }
+
     if (isMissingReceiverError(extractionError) && isInjectableUrl(url)) {
       try {
         await dependencies.scriptingApi.executeScript({

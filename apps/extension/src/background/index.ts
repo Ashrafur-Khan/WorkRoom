@@ -55,6 +55,24 @@ async function refreshTabsForDomain(domain: string): Promise<void> {
   );
 }
 
+async function unblockAllTabs(): Promise<void> {
+  const tabs = await chrome.tabs.query({});
+
+  await Promise.all(
+    tabs.map(async (tab) => {
+      if (!tab.id) {
+        return;
+      }
+
+      try {
+        await chrome.tabs.sendMessage(tab.id, { type: 'UNBLOCK_PAGE' });
+      } catch {
+        log('unblock-message-skipped', { tabId: tab.id });
+      }
+    }),
+  );
+}
+
 async function updateRunningSessionState(
   mutate: (
     state: RunningSessionState,
@@ -83,6 +101,9 @@ async function endSession(goal?: string): Promise<void> {
   await chrome.storage.local.set({ sessionState: createIdleState() });
   resetClassifierSessionState();
   await clearBadgesForAllTabs();
+  await unblockAllTabs();
+  // Closing the offscreen document is also the supported ML teardown path, so
+  // session completion drops cached embeddings without changing session state.
   await closeOffscreenDocument(appendDebugLog);
 
   chrome.notifications.create(
@@ -156,9 +177,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'STOP_SESSION') {
     void (async () => {
       await appendDebugLog(createDebugEntry('session-stopped'));
+      await chrome.storage.local.set({ sessionState: createIdleState() });
+      // Manual stop follows the same offscreen teardown path as alarm-driven
+      // completion so model caches do not leak across sessions.
       await closeOffscreenDocument(appendDebugLog);
       resetClassifierSessionState();
       await clearBadgesForAllTabs();
+      await unblockAllTabs();
     })();
     return false;
   }

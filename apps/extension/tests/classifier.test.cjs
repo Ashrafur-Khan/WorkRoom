@@ -10,6 +10,7 @@ const {
 } = require('../.test-build/lib/ml-helpers.js');
 const {
   classifyWithModel,
+  clearModelCaches,
   configureModelManagerForTesting,
   resetModelManagerForTesting,
 } = require('../.test-build/lib/model-manager.js');
@@ -29,27 +30,16 @@ function installAssetFetchStub() {
   global.fetch = async () => ({ ok: true });
 }
 
-function createEmbeddingTensor(embedding) {
-  return {
-    async array() {
-      return [embedding];
-    },
-    dispose() {},
+function mockPipeline(embeddingsByInput) {
+  return async () => async (text) => {
+    const embedding = embeddingsByInput[text];
+
+    if (!embedding) {
+      throw new Error(`Missing mock embedding for input: ${text}`);
+    }
+
+    return { data: new Float32Array(embedding) };
   };
-}
-
-function mockUseModel(embeddingsByInput) {
-  return async () => ({
-    async embed([text]) {
-      const embedding = embeddingsByInput[text];
-
-      if (!embedding) {
-        throw new Error(`Missing mock embedding for input: ${text}`);
-      }
-
-      return createEmbeddingTensor(embedding);
-    },
-  });
 }
 
 test('normalizeText collapses punctuation and casing', () => {
@@ -108,8 +98,8 @@ test('classifyUrl returns ML off-task result when offscreen responds negatively'
 
 test('classifyUrl falls back to heuristics when offscreen request fails', async () => {
   const result = await classifyUrl(
-    'https://github.com/tensorflow/tfjs',
-    'TensorFlow.js repository',
+    'https://github.com/huggingface/transformers.js',
+    'Transformers.js repository',
     'Ship extension ml',
     { requestId: 'req-3', tabId: 3 },
     {
@@ -127,8 +117,8 @@ test('classifyUrl falls back to heuristics when offscreen request fails', async 
 
 test('classifyUrl uses background heuristic when offscreen returns fallback', async () => {
   const result = await classifyUrl(
-    'https://github.com/tensorflow/tfjs',
-    'TensorFlow.js repository',
+    'https://github.com/huggingface/transformers.js',
+    'Transformers.js repository',
     'Ship extension ml',
     { requestId: 'req-3b', tabId: 33 },
     {
@@ -198,12 +188,11 @@ test('background heuristic does not force youtube off-task during ML fallback', 
   assert.equal(result.source, 'heuristic');
 });
 
-test('classifyWithModel returns fallback response if tf runtime fails', async () => {
+test('classifyWithModel returns fallback response if pipeline init fails', async () => {
   installChromeRuntime();
   configureModelManagerForTesting({
-    getBackend: () => '',
-    ready: async () => undefined,
-    setBackend: async () => false,
+    createPipeline: async () => { throw new Error('Pipeline initialization failed'); },
+    verifyAssetExists: async () => undefined,
   });
 
   const result = await classifyWithModel({
@@ -216,27 +205,61 @@ test('classifyWithModel returns fallback response if tf runtime fails', async ()
   assert.equal(result.modelState, 'fallback');
   assert.equal(result.score, null);
   assert.equal(typeof result.error, 'string');
-  assert.match(result.error, /backend initialization failed/i);
+  assert.match(result.error, /pipeline initialization failed/i);
 });
 
-test('classifyWithModel prefers the webgl backend when available', async () => {
+test('classifyWithModel reports the config.json sentinel when model asset fetch fails', async () => {
+  installChromeRuntime();
+  global.fetch = async () => {
+    throw new Error('Failed to fetch');
+  };
+
+  const result = await classifyWithModel({
+    goal: 'Study calculus',
+    requestId: 'req-asset-fetch',
+    title: 'Calculus lecture notes',
+    url: 'https://example.edu/calculus',
+  });
+
+  assert.equal(result.modelState, 'fallback');
+  assert.equal(result.score, null);
+  assert.equal(typeof result.error, 'string');
+  assert.match(result.error, /assets\/models\/minilm\/Xenova\/all-MiniLM-L6-v2\/config\.json/i);
+  assert.match(result.error, /failed to fetch/i);
+});
+
+test('classifyWithModel reports the ORT loader sentinel when runtime asset fetch fails', async () => {
+  installChromeRuntime();
+  global.fetch = async (path) => {
+    if (String(path).includes('ort-wasm-simd-threaded.jsep.mjs')) {
+      throw new Error('Failed to fetch');
+    }
+
+    return { ok: true };
+  };
+
+  const result = await classifyWithModel({
+    goal: 'Study calculus',
+    requestId: 'req-ort-asset-fetch',
+    title: 'Calculus lecture notes',
+    url: 'https://example.edu/calculus',
+  });
+
+  assert.equal(result.modelState, 'fallback');
+  assert.equal(result.score, null);
+  assert.equal(typeof result.error, 'string');
+  assert.match(result.error, /assets\/ort-wasm-simd-threaded\.jsep\.mjs/i);
+  assert.match(result.error, /failed to fetch/i);
+});
+
+test('classifyWithModel emits wasm-only debug metadata while classifying', async () => {
   installChromeRuntime();
 
-  const backendAttempts = [];
-  let activeBackend = 'cpu';
-
   configureModelManagerForTesting({
-    getBackend: () => activeBackend,
-    loadModel: mockUseModel({
+    createPipeline: mockPipeline({
       'study calculus': [1, 0, 0],
       'calculus lecture notes example': [1, 0, 0],
     }),
-    ready: async () => undefined,
-    setBackend: async (backend) => {
-      backendAttempts.push(backend);
-      activeBackend = backend;
-      return backend === 'webgl';
-    },
     verifyAssetExists: async () => undefined,
   });
 
@@ -244,70 +267,129 @@ test('classifyWithModel prefers the webgl backend when available', async () => {
   const result = await classifyWithModel(
     {
       goal: 'Study calculus',
-      requestId: 'req-webgl',
+      requestId: 'req-pipeline',
       title: 'Calculus lecture notes',
       url: 'https://example.edu/calculus',
     },
     (event) => debugEvents.push(event),
   );
 
-  assert.deepEqual(backendAttempts, ['webgl']);
   assert.equal(result.modelState, 'ready');
-  assert.equal(result.backend, 'webgl');
+  assert.equal(result.backend, 'wasm');
   assert.equal(result.classification, 'on-task');
+  assert.equal(debugEvents[0]?.status, 'cache-miss');
+  assert.equal(debugEvents[0]?.metadata?.cache, 'goal');
+  assert.equal(debugEvents[1]?.status, 'model-loading');
+  assert.equal(debugEvents[1]?.backend, 'wasm');
+  assert.equal(debugEvents[2]?.status, 'model-ready');
+  assert.equal(debugEvents[2]?.backend, 'wasm');
+  assert.equal(typeof debugEvents[2]?.metadata?.loadDurationMs, 'number');
+  assert.equal(debugEvents[3]?.status, 'cache-miss');
+  assert.equal(debugEvents[3]?.metadata?.cache, 'page');
   assert.equal(debugEvents.at(-1)?.status, 'classification-complete');
-  assert.equal(debugEvents.at(-1)?.backend, 'webgl');
+  assert.equal(debugEvents.at(-1)?.backend, 'wasm');
+  assert.equal(typeof debugEvents.at(-1)?.metadata?.classificationDurationMs, 'number');
 });
 
-test('classifyWithModel falls back to cpu when webgl initialization fails', async () => {
+test('classifyWithModel reuses cached pipeline across calls', async () => {
   installChromeRuntime();
 
-  const backendAttempts = [];
-  let activeBackend = 'cpu';
+  let createCount = 0;
 
   configureModelManagerForTesting({
-    getBackend: () => activeBackend,
-    loadModel: mockUseModel({
-      'study calculus': [1, 0, 0],
-      'calculus lecture notes example': [1, 0, 0],
-    }),
-    ready: async () => undefined,
-    setBackend: async (backend) => {
-      backendAttempts.push(backend);
-
-      if (backend === 'webgl') {
-        throw new Error('WebGL context creation failed');
-      }
-
-      activeBackend = backend;
-      return backend === 'cpu';
+    createPipeline: async () => {
+      createCount++;
+      return async (text) => ({
+        data: new Float32Array([1, 0, 0]),
+      });
     },
     verifyAssetExists: async () => undefined,
   });
 
+  await classifyWithModel({
+    goal: 'Study calculus',
+    requestId: 'req-a',
+    title: 'Calculus lecture notes',
+    url: 'https://example.edu/calculus',
+  });
+
+  await classifyWithModel({
+    goal: 'Study calculus',
+    requestId: 'req-b',
+    title: 'Calculus lecture notes',
+    url: 'https://example.edu/calculus',
+  });
+
+  assert.equal(createCount, 1);
+});
+
+test('classifyWithModel emits fallback timing metadata when inference fails', async () => {
+  installChromeRuntime();
+
   const debugEvents = [];
+
+  configureModelManagerForTesting({
+    createPipeline: async () => async () => {
+      throw new Error('pipeline blew up');
+    },
+    verifyAssetExists: async () => undefined,
+  });
+
   const result = await classifyWithModel(
     {
       goal: 'Study calculus',
-      requestId: 'req-cpu',
+      requestId: 'req-fallback-debug',
       title: 'Calculus lecture notes',
       url: 'https://example.edu/calculus',
     },
     (event) => debugEvents.push(event),
   );
 
-  assert.deepEqual(backendAttempts, ['webgl', 'cpu']);
-  assert.equal(result.modelState, 'ready');
-  assert.equal(result.backend, 'cpu');
-  assert.equal(result.classification, 'on-task');
-  assert.deepEqual(
-    debugEvents
-      .filter((event) => event.status === 'model-loading')
-      .map((event) => event.backend),
-    ['webgl', 'cpu'],
-  );
-  assert.equal(debugEvents.at(-1)?.metadata?.downgradedFrom, 'webgl');
-  assert.match(debugEvents.at(-1)?.metadata?.downgradeReason ?? '', /context creation failed/i);
+  assert.equal(result.modelState, 'fallback');
+  assert.equal(debugEvents.at(-1)?.status, 'classification-fallback');
+  assert.equal(debugEvents.at(-1)?.backend, 'wasm');
+  assert.equal(typeof debugEvents.at(-1)?.metadata?.classificationDurationMs, 'number');
+});
+
+test('clearModelCaches forces page and goal embeddings to be recomputed', async () => {
+  installChromeRuntime();
+
+  const seenInputs = [];
+
+  configureModelManagerForTesting({
+    createPipeline: async () => async (text) => {
+      seenInputs.push(text);
+      return { data: new Float32Array([1, 0, 0]) };
+    },
+    verifyAssetExists: async () => undefined,
+  });
+
+  await classifyWithModel({
+    goal: 'Study calculus',
+    requestId: 'req-cache-a',
+    title: 'Calculus lecture notes',
+    url: 'https://example.edu/calculus',
+  });
+
+  await classifyWithModel({
+    goal: 'Study calculus',
+    requestId: 'req-cache-b',
+    title: 'Calculus lecture notes',
+    url: 'https://example.edu/calculus',
+  });
+
+  assert.equal(seenInputs.length, 2);
+
+  clearModelCaches();
+
+  await classifyWithModel({
+    goal: 'Study calculus',
+    requestId: 'req-cache-c',
+    title: 'Calculus lecture notes',
+    url: 'https://example.edu/calculus',
+  });
+
+  assert.equal(seenInputs.length, 4);
 });
 
 test.afterEach(() => {

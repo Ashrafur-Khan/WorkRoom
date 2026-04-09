@@ -6,16 +6,13 @@
   "scripts": {
     "test": "node apps/extension/scripts/run-tests.mjs",
     "dev:extension": "vite --config apps/extension/vite.config.ts",
-    "build:extension": "node apps/extension/scripts/build-extension.mjs"
-
+    "build:extension": "node apps/extension/scripts/build-extension.mjs",
+    "threshold:calibrate": "node apps/extension/scripts/threshold-harness.mjs"
   },
   "dependencies": {
-    "@tensorflow-models/universal-sentence-encoder": "^1.3.3",
-    "@tensorflow/tfjs": "^3.21.0",
-    "@tensorflow/tfjs-backend-wasm": "^3.21.0"
+    "@huggingface/transformers": "^3.4.0"
   },
   "devDependencies": {
-    "@tensorflow/tfjs-node": "^3.21.0",
     "@types/chrome": "^0.0.272",
     "@types/node": "^24.10.1",
     "typescript": "^5.0.0",
