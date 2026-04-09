@@ -4,7 +4,9 @@
  * Runs every labeled pair from threshold-pairs.ts through the real model
  * and outputs a score distribution table + threshold suggestions.
  *
- * Usage: node apps/extension/scripts/threshold-harness.mjs
+ * Usage:
+ *   node apps/extension/scripts/threshold-harness.mjs
+ *   node apps/extension/scripts/threshold-harness.mjs src/__tests__/threshold-pairs-expanded.ts THRESHOLD_PAIRS_EXPANDED
  *
  * First run downloads ~23MB model from HuggingFace Hub.
  * Subsequent runs use the cached model in ~/.cache/huggingface/.
@@ -20,6 +22,20 @@ const __dirname = dirname(__filename);
 const extensionRoot = resolve(__dirname, '..');
 const repoRoot = resolve(extensionRoot, '..', '..');
 const testBuild = resolve(extensionRoot, '.test-build');
+const [, , pairSourceArg, pairExportArg] = process.argv;
+const pairSource = pairSourceArg ?? 'src/__tests__/threshold-pairs.ts';
+const pairExport = pairExportArg ?? 'THRESHOLD_PAIRS';
+
+function toCompiledPairModulePath(sourcePath) {
+  const normalized = sourcePath.replace(/\\/g, '/');
+  const relativeSource = normalized.startsWith('apps/extension/src/')
+    ? normalized.slice('apps/extension/'.length)
+    : normalized;
+  if (!relativeSource.startsWith('src/')) {
+    throw new Error(`Pair source must be under apps/extension/src; got "${sourcePath}"`);
+  }
+  return resolve(testBuild, relativeSource.slice('src/'.length).replace(/\.ts$/, '.js'));
+}
 
 // ── Step 0: Compile TypeScript ─────────────────────────────────
 console.log('Compiling TypeScript...');
@@ -35,11 +51,18 @@ if (tscResult.status !== 0) {
 }
 
 // ── Step 1: Load compiled modules via CJS interop ──────────────
-const { THRESHOLD_PAIRS } = require_(resolve(testBuild, '__tests__/threshold-pairs.js'));
+const pairModulePath = toCompiledPairModulePath(pairSource);
+const pairModule = require_(pairModulePath);
+const THRESHOLD_PAIRS = pairModule[pairExport];
+if (!Array.isArray(THRESHOLD_PAIRS)) {
+  throw new Error(`Export "${pairExport}" was not found or is not an array in ${pairSource}`);
+}
 const { normalizeText, cosineSimilarity, classifyCosineScore, ML_THRESHOLDS, ML_BORDERLINE_WINDOW } = require_(
   resolve(testBuild, 'lib/ml-helpers.js'),
 );
 const { buildNormalizedPageContext } = require_(resolve(testBuild, 'lib/page-signals.js'));
+
+console.log(`Using pair source: ${pairSource} (${pairExport}, ${THRESHOLD_PAIRS.length} pairs)`);
 
 // ── Step 2: Load MiniLM-L6-v2 pipeline ─────────────────────────
 console.log('Loading MiniLM-L6-v2 model (first run downloads ~23MB)...');
