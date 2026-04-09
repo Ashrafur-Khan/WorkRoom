@@ -14,8 +14,8 @@ const MODEL_CONFIG_PATH = `${MODEL_DIRECTORY}/Xenova/all-MiniLM-L6-v2/config.jso
 const ORT_ASSET_DIRECTORY = 'assets';
 const ORT_WASM_MODULE_PATH = `${ORT_ASSET_DIRECTORY}/ort-wasm-simd-threaded.jsep.mjs`;
 const ORT_WASM_BINARY_PATH = `${ORT_ASSET_DIRECTORY}/ort-wasm-simd-threaded.jsep.wasm`;
-// The response contract still exposes `backend` for background compatibility, even
-// though the offscreen runtime now only supports ONNX Runtime WASM.
+// The response contract still exposes `backend` for background compatibility,
+// even though the packaged extension runtime is WASM-only today.
 const BACKEND_NAME = 'wasm';
 
 type ModelManagerTestOverrides = {

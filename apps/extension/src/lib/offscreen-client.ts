@@ -194,8 +194,8 @@ export async function requestMlClassification(
   context: ClassificationContext,
   appendDebugLog: (entry: DebugLogEntry) => Promise<void> | void,
 ): Promise<MlClassificationResult> {
-  // The background keeps consuming a `ready` vs `fallback` ML contract even
-  // though the underlying runtime has changed from TF.js to ONNX Runtime WASM.
+  // The background consumes a stable `ready` vs `fallback` ML contract without
+  // depending on the specific offscreen inference runtime details.
   await ensureOffscreenDocument(appendDebugLog);
   const startedAt = Date.now();
 

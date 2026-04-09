@@ -98,8 +98,8 @@ test('classifyUrl returns ML off-task result when offscreen responds negatively'
 
 test('classifyUrl falls back to heuristics when offscreen request fails', async () => {
   const result = await classifyUrl(
-    'https://github.com/tensorflow/tfjs',
-    'TensorFlow.js repository',
+    'https://github.com/huggingface/transformers.js',
+    'Transformers.js repository',
     'Ship extension ml',
     { requestId: 'req-3', tabId: 3 },
     {
@@ -117,8 +117,8 @@ test('classifyUrl falls back to heuristics when offscreen request fails', async 
 
 test('classifyUrl uses background heuristic when offscreen returns fallback', async () => {
   const result = await classifyUrl(
-    'https://github.com/tensorflow/tfjs',
-    'TensorFlow.js repository',
+    'https://github.com/huggingface/transformers.js',
+    'Transformers.js repository',
     'Ship extension ml',
     { requestId: 'req-3b', tabId: 33 },
     {

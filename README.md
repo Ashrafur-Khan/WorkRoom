@@ -12,6 +12,7 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
 - The background service worker remains the policy and enforcement layer.
 - When ML cannot produce a result, the background falls back to heuristics in `classifier.ts`.
 - The packaged model/runtime path is local-only: MiniLM model assets and ONNX Runtime web assets are bundled into the extension and loaded from `chrome-extension://` URLs.
+- Build-time model handling is packaging-only: the build either copies vendored MiniLM files from `apps/extension/ml/minilm/` or fetches the required Hugging Face assets, but it does not generate model artifacts.
 - Already-open tabs can now be blocked even after extension reload or late activation because the background can reinject the content script and retry delivery when a tab has no receiver.
 - Users can override an off-task block for the current session or snooze it for `5`, `10`, or `15` minutes on the current domain.
 
@@ -113,7 +114,7 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
    - `npm run build:extension`
 5. Run tests:
    - `npm test`
-6. Run threshold calibration harness (downloads model on first run):
+6. Run threshold calibration harness (downloads a local cache copy on first run):
    - `npm run threshold:calibrate`
 
 ## Stage 2 Manual QA Checklist
@@ -138,7 +139,7 @@ WorkRoom is a Manifest V3 Chrome extension for focus sessions. A user enters a g
   - MiniLM-L6-v2 model files (config, tokenizer, quantized ONNX model) into `dist/assets/models/minilm/Xenova/all-MiniLM-L6-v2/`
   - `config.json` acts as the runtime preflight sentinel used by the offscreen loader before pipeline initialization
   - The build validates that the required ORT runtime module and WASM files are present in `dist/assets/` before succeeding
-  - To pre-vendor the model and avoid a network download at build time, place the model files in `apps/extension/ml/minilm/`
+  - If `apps/extension/ml/minilm/` exists, the build copies those packaged model files; otherwise it fetches the required files from Hugging Face at build time
 
 ## Current Behavior
 - Starting a session triggers an immediate sweep across all open tabs.
