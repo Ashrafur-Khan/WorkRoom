@@ -610,21 +610,24 @@ test('runSecurityCheckForState requests richer page signals for borderline class
             return {
               ok: true,
               signals: {
-                appMarkers: ['document-page'],
                 durationMs: 12,
                 extractedAt: Date.now(),
                 headings: ['Focus article'],
-                mainTextSnippet: 'A detailed guide to planning focused work.',
+                mainTextSnippets: ['A detailed guide to planning focused work.'],
                 metaDescription: 'Practical focus systems.',
-                navLabels: ['Docs'],
+                pageMarkers: ['document-page'],
                 pathnameTokens: ['article'],
+                sectionHints: ['Docs'],
                 signalCounts: {
-                  appMarkers: 1,
                   headings: 1,
+                  mainSnippetCount: 1,
                   mainTextLength: 41,
-                  navLabels: 1,
+                  pageMarkers: 1,
                   pathnameTokens: 1,
+                  sectionHints: 1,
+                  structuredTypes: 1,
                 },
+                structuredTypes: ['article'],
                 title: 'Focus article',
               },
             };
@@ -659,6 +662,14 @@ test('runSecurityCheckForState requests richer page signals for borderline class
   assert.equal(calls.messages[0].message.type, 'EXTRACT_PAGE_SIGNALS');
   assert.equal(calls.debugEntries.some((entry) => entry.status === 'signal-extraction-complete'), true);
   assert.equal(calls.debugEntries.find((entry) => entry.status === 'signal-extraction-complete')?.signalSnapshot?.title, 'Focus article');
+  assert.equal(
+    calls.debugEntries.find((entry) => entry.status === 'signal-extraction-complete')?.metadata?.structuredTypes,
+    1,
+  );
+  assert.deepEqual(
+    calls.debugEntries.find((entry) => entry.status === 'signal-extraction-complete')?.signalSnapshot?.mainTextSnippets,
+    ['A detailed guide to planning focused work.'],
+  );
 });
 
 test('runSecurityCheckForState drops stale classification results when the tab navigates', async () => {
