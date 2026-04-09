@@ -258,7 +258,7 @@ test('classifyWithModel emits wasm-only debug metadata while classifying', async
   configureModelManagerForTesting({
     createPipeline: mockPipeline({
       'study calculus': [1, 0, 0],
-      'calculus lecture notes example': [1, 0, 0],
+      'calculus lecture notes. example': [1, 0, 0],
     }),
     verifyAssetExists: async () => undefined,
   });

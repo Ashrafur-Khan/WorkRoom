@@ -290,12 +290,14 @@ async function requestPageSignals(
     await dependencies.appendDebugLog(
       createDebugEntry('signal-extraction-complete', {
         metadata: {
-          appMarkers: response.signals.signalCounts.appMarkers,
           durationMs: response.signals.durationMs,
           headings: response.signals.signalCounts.headings,
+          mainSnippetCount: response.signals.signalCounts.mainSnippetCount,
           mainTextLength: response.signals.signalCounts.mainTextLength,
-          navLabels: response.signals.signalCounts.navLabels,
+          pageMarkers: response.signals.signalCounts.pageMarkers,
           pathnameTokens: response.signals.signalCounts.pathnameTokens,
+          sectionHints: response.signals.signalCounts.sectionHints,
+          structuredTypes: response.signals.signalCounts.structuredTypes,
           url,
         },
         requestId,
@@ -358,13 +360,15 @@ async function requestPageSignals(
         await dependencies.appendDebugLog(
           createDebugEntry('signal-extraction-complete', {
             metadata: {
-              appMarkers: retryResponse.signals.signalCounts.appMarkers,
               durationMs: retryResponse.signals.durationMs,
               headings: retryResponse.signals.signalCounts.headings,
+              mainSnippetCount: retryResponse.signals.signalCounts.mainSnippetCount,
               mainTextLength: retryResponse.signals.signalCounts.mainTextLength,
-              navLabels: retryResponse.signals.signalCounts.navLabels,
+              pageMarkers: retryResponse.signals.signalCounts.pageMarkers,
               pathnameTokens: retryResponse.signals.signalCounts.pathnameTokens,
+              sectionHints: retryResponse.signals.signalCounts.sectionHints,
               strategy: 'reinject-content-script',
+              structuredTypes: retryResponse.signals.signalCounts.structuredTypes,
               url,
             },
             requestId,

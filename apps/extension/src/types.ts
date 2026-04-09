@@ -2,23 +2,26 @@
 export type Classification = 'on-task' | 'off-task' | 'ambiguous';
 
 export type PageSignalCounts = {
-  appMarkers: number;
   headings: number;
+  mainSnippetCount: number;
   mainTextLength: number;
-  navLabels: number;
+  pageMarkers: number;
   pathnameTokens: number;
+  sectionHints: number;
+  structuredTypes: number;
 };
 
 export type PageSignals = {
-  appMarkers: string[];
   durationMs: number;
   extractedAt: number;
   headings: string[];
-  mainTextSnippet: string;
+  mainTextSnippets: string[];
   metaDescription: string;
-  navLabels: string[];
+  pageMarkers: string[];
   pathnameTokens: string[];
+  sectionHints: string[];
   signalCounts: PageSignalCounts;
+  structuredTypes: string[];
   title: string;
 };
 
@@ -34,7 +37,7 @@ export type ExtractPageSignalsResponse =
 
 export type SignalSnapshot = Pick<
   PageSignals,
-  'appMarkers' | 'headings' | 'mainTextSnippet' | 'metaDescription' | 'navLabels' | 'pathnameTokens' | 'title'
+  'headings' | 'mainTextSnippets' | 'metaDescription' | 'pageMarkers' | 'pathnameTokens' | 'sectionHints' | 'structuredTypes' | 'title'
 >;
 
 export type RunningSessionState = {
