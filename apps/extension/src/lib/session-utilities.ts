@@ -1,30 +1,86 @@
 import type { RunningSessionState, SessionState } from '../types';
 
-/**
- * Checks if a session is currently running AND valid (time hasn't expired).
- * Returns 'active' if running, 'expired' if it just finished, or 'idle'.
- */
-export function getSessionStatus(state: SessionState): 'active' | 'expired' | 'idle' {
-  if (!state.isRunning) return 'idle';
+type LocalStorageApi = Pick<typeof chrome.storage.local, 'get' | 'set'>;
 
-  const now = Date.now();
-  const endTime = state.startTime + (state.durationMinutes * 60 * 1000);
+type DomainOverrideStatus =
+  | { status: 'allowed' }
+  | { expiresAt: number; status: 'expired' | 'snoozed' }
+  | { status: 'none' };
 
-  if (now >= endTime) {
-    return 'expired';
-  }
-
-  return 'active';
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
-/**
- * Helper to construct the "End Session" state object consistently
- */
+function areStringArraysEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function areSnoozedDomainsEqual(
+  left: Record<string, number>,
+  right: Record<string, number>,
+): boolean {
+  const leftEntries = Object.entries(left);
+  const rightEntries = Object.entries(right);
+
+  if (leftEntries.length !== rightEntries.length) {
+    return false;
+  }
+
+  return leftEntries.every(([key, value]) => right[key] === value);
+}
+
+function normalizeAllowedDomains(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((domain): domain is string => typeof domain === 'string');
+}
+
+function normalizeSnoozedDomains(value: unknown): Record<string, number> {
+  if (!isRecord(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [string, number] => typeof entry[0] === 'string' && typeof entry[1] === 'number' && Number.isFinite(entry[1]),
+    ),
+  );
+}
+
+function isValidRunningStateFields(state: Record<string, unknown>): state is Record<string, unknown> & {
+  durationMinutes: number;
+  goal: string;
+  startTime: number;
+} {
+  return (
+    typeof state.goal === 'string' &&
+    typeof state.durationMinutes === 'number' &&
+    Number.isFinite(state.durationMinutes) &&
+    state.durationMinutes > 0 &&
+    typeof state.startTime === 'number' &&
+    Number.isFinite(state.startTime)
+  );
+}
+
+export function safeParseUrl(url: string): URL | null {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
+  }
+}
+
 export function createIdleState(): SessionState {
   return { isRunning: false };
 }
 
-export function createRunningState(goal: string, durationMinutes: number, startTime = Date.now()): RunningSessionState {
+export function createRunningState(
+  goal: string,
+  durationMinutes: number,
+  startTime = Date.now(),
+): RunningSessionState {
   return {
     allowedDomains: [],
     durationMinutes,
@@ -36,48 +92,130 @@ export function createRunningState(goal: string, durationMinutes: number, startT
 }
 
 export function getDomainFromUrl(url: string): string | null {
-  try {
-    return new URL(url).hostname.toLowerCase();
-  } catch {
-    return null;
-  }
+  return safeParseUrl(url)?.hostname.toLowerCase() ?? null;
 }
 
-export function normalizeSessionState(state: SessionState | undefined): {
+export function normalizeSessionState(raw: unknown): {
   changed: boolean;
   state: SessionState;
 } {
-  if (!state || !state.isRunning) {
+  if (raw === undefined) {
     return {
-      changed: state !== undefined && state.isRunning !== false,
+      changed: false,
       state: createIdleState(),
     };
   }
 
-  const allowedDomainsRaw = (state as Partial<RunningSessionState>).allowedDomains;
-  const allowedDomains = Array.isArray(allowedDomainsRaw)
-    ? allowedDomainsRaw.filter((domain): domain is string => typeof domain === 'string')
-    : [];
-  const snoozedDomainsRaw = (state as Partial<RunningSessionState>).snoozedDomains;
-  const snoozedDomainsEntries = Object.entries(
-    snoozedDomainsRaw && typeof snoozedDomainsRaw === 'object' ? snoozedDomainsRaw : {},
-  ).filter((entry): entry is [string, number] => typeof entry[0] === 'string' && typeof entry[1] === 'number');
-  const snoozedDomains = Object.fromEntries(snoozedDomainsEntries);
+  if (!isRecord(raw) || raw.isRunning !== true) {
+    return {
+      changed: !isRecord(raw) || Object.keys(raw).length !== 1 || raw.isRunning !== false,
+      state: createIdleState(),
+    };
+  }
+
+  if (!isValidRunningStateFields(raw)) {
+    return {
+      changed: true,
+      state: createIdleState(),
+    };
+  }
+
+  const rawAllowedDomains = raw.allowedDomains;
+  const rawSnoozedDomains = raw.snoozedDomains;
+  const allowedDomains = normalizeAllowedDomains(rawAllowedDomains);
+  const snoozedDomains = normalizeSnoozedDomains(rawSnoozedDomains);
   const normalizedState: RunningSessionState = {
     allowedDomains,
-    durationMinutes: state.durationMinutes,
-    goal: state.goal,
+    durationMinutes: raw.durationMinutes,
+    goal: raw.goal,
     isRunning: true,
     snoozedDomains,
-    startTime: state.startTime,
+    startTime: raw.startTime,
   };
 
   const changed =
-    allowedDomains.length !== ((state as Partial<RunningSessionState>).allowedDomains?.length ?? 0) ||
-    snoozedDomainsEntries.length !== Object.keys(snoozedDomains).length;
+    !Array.isArray(rawAllowedDomains) ||
+    allowedDomains.length !== rawAllowedDomains.length ||
+    !areStringArraysEqual(allowedDomains, rawAllowedDomains.filter((value): value is string => typeof value === 'string')) ||
+    !isRecord(rawSnoozedDomains) ||
+    Object.keys(snoozedDomains).length !== Object.keys(rawSnoozedDomains).length ||
+    !areSnoozedDomainsEqual(snoozedDomains, normalizeSnoozedDomains(rawSnoozedDomains)) ||
+    raw.goal !== normalizedState.goal ||
+    raw.durationMinutes !== normalizedState.durationMinutes ||
+    raw.startTime !== normalizedState.startTime ||
+    raw.isRunning !== true;
 
   return {
     changed,
     state: normalizedState,
   };
+}
+
+export async function readSessionState(
+  storageApi: LocalStorageApi = chrome.storage.local,
+): Promise<SessionState> {
+  const result = await storageApi.get('sessionState') as { sessionState?: unknown };
+  const normalized = normalizeSessionState(result.sessionState);
+
+  if (normalized.changed) {
+    await storageApi.set({ sessionState: normalized.state });
+  }
+
+  return normalized.state;
+}
+
+export async function writeSessionState(
+  state: SessionState,
+  storageApi: Pick<typeof chrome.storage.local, 'set'> = chrome.storage.local,
+): Promise<void> {
+  await storageApi.set({ sessionState: state });
+}
+
+export function allowDomainForSession(
+  state: RunningSessionState,
+  domain: string,
+): { wasDuplicate: boolean } {
+  const wasDuplicate = state.allowedDomains.includes(domain);
+
+  if (!wasDuplicate) {
+    state.allowedDomains.push(domain);
+  }
+
+  delete state.snoozedDomains[domain];
+
+  return { wasDuplicate };
+}
+
+export function snoozeDomainForSession(
+  state: RunningSessionState,
+  domain: string,
+  durationMinutes: number,
+  now = Date.now(),
+): { expiresAt: number } {
+  const expiresAt = now + durationMinutes * 60 * 1000;
+  state.snoozedDomains[domain] = expiresAt;
+
+  return { expiresAt };
+}
+
+export function resolveSessionOverride(
+  state: RunningSessionState,
+  domain: string,
+  now = Date.now(),
+): DomainOverrideStatus {
+  if (state.allowedDomains.includes(domain)) {
+    return { status: 'allowed' };
+  }
+
+  const expiresAt = state.snoozedDomains[domain];
+
+  if (!expiresAt) {
+    return { status: 'none' };
+  }
+
+  if (expiresAt <= now) {
+    return { expiresAt, status: 'expired' };
+  }
+
+  return { expiresAt, status: 'snoozed' };
 }

@@ -150,7 +150,7 @@ async function copyOnnxRuntimeAssets() {
   }
 }
 
-export function validateDistOnnxRuntimeAssets() {
+function validateDistOnnxRuntimeAssets() {
   if (!existsSync(distAssetsRoot)) {
     throw new Error(`Missing dist assets directory: ${distAssetsRoot}`);
   }

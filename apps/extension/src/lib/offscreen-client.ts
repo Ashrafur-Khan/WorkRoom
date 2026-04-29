@@ -1,70 +1,43 @@
-import type { Classification, DebugLogEntry, PageSignals } from '../types';
-import type { MlClassifyRequest, MlClassifyResponse } from './model-manager';
+import type {
+  DebugLogEntry,
+  MlClassifyRequest,
+  MlClassifyRequestMessage,
+  MlClassifyResponse,
+  MlOffscreenCloseMessage,
+} from '../types';
 
 const OFFSCREEN_DOCUMENT_PATH = 'src/offscreen/offscreen.html';
 const OFFSCREEN_JUSTIFICATION =
   'Run ONNX Runtime sentence-embedding inference in a DOM-capable extension page instead of the background service worker.';
 
+type OffscreenLifecycleMessage = MlClassifyRequestMessage | MlOffscreenCloseMessage;
+
 type OffscreenClientTestOverrides = {
   closeDocument?: () => Promise<void>;
   createDocument?: () => Promise<void>;
   hasOffscreenDocument?: () => Promise<boolean>;
-  sendRuntimeMessage?: (message: unknown) => Promise<unknown>;
+  sendRuntimeMessage?: (message: OffscreenLifecycleMessage) => Promise<unknown>;
 };
 
-// Offscreen lifecycle operations are serialized so classification traffic cannot
-// race document creation against teardown during rapid session changes.
 let offscreenLifecyclePromise: Promise<void> = Promise.resolve();
 let testOverrides: OffscreenClientTestOverrides = {};
 
-export type ClassificationContext = {
-  goal: string;
-  pageSignals?: PageSignals;
-  requestId: string;
-  tabId?: number;
-  title: string;
-  url: string;
-};
-
-export type MlClassificationResult =
-  | {
-      backend: string;
-      cacheHit: boolean;
-      classification: Classification;
-      modelState: 'ready';
-      score: number;
-    }
-  | {
-      backend: string;
-      cacheHit: false;
-      error: string;
-      modelState: 'fallback';
-      score: null;
-    };
-
-function isMlClassificationResult(value: unknown): value is MlClassificationResult {
+function isMlClassificationResponse(value: unknown): value is MlClassifyResponse {
   if (!value || typeof value !== 'object') {
     return false;
   }
 
-  const candidate = value as Record<string, unknown>;
+  const candidate = value as Partial<MlClassifyResponse>;
   if (typeof candidate.backend !== 'string' || typeof candidate.cacheHit !== 'boolean') {
     return false;
   }
 
   if (candidate.modelState === 'ready') {
-    return (
-      typeof candidate.classification === 'string' &&
-      typeof candidate.score === 'number'
-    );
+    return typeof candidate.classification === 'string' && typeof candidate.score === 'number';
   }
 
   if (candidate.modelState === 'fallback') {
-    return (
-      typeof candidate.error === 'string' &&
-      candidate.cacheHit === false &&
-      candidate.score === null
-    );
+    return typeof candidate.error === 'string' && candidate.cacheHit === false && candidate.score === null;
   }
 
   return false;
@@ -91,18 +64,14 @@ async function hasOffscreenDocument(): Promise<boolean> {
     return testOverrides.hasOffscreenDocument();
   }
 
-  if (!('offscreen' in chrome)) {
+  if (!('offscreen' in chrome) || typeof chrome.runtime.getContexts !== 'function') {
     return false;
   }
 
-  const getContexts = chrome.runtime.getContexts as unknown as (
-    options: Record<string, unknown>,
-  ) => Promise<Array<Record<string, unknown>>>;
-
-  const contexts = await getContexts({
-    contextTypes: ['OFFSCREEN_DOCUMENT'],
+  const contexts = await (chrome.runtime.getContexts({
+    contextTypes: [chrome.runtime.ContextType.OFFSCREEN_DOCUMENT],
     documentUrls: [chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH)],
-  });
+  }) as Promise<chrome.runtime.ExtensionContext[]>);
 
   return contexts.length > 0;
 }
@@ -129,7 +98,7 @@ async function closeChromeOffscreenDocument(): Promise<void> {
   await chrome.offscreen.closeDocument();
 }
 
-async function sendRuntimeMessage(message: unknown): Promise<unknown> {
+async function sendRuntimeMessage(message: OffscreenLifecycleMessage): Promise<unknown> {
   if (testOverrides.sendRuntimeMessage) {
     return testOverrides.sendRuntimeMessage(message);
   }
@@ -191,21 +160,15 @@ export async function closeOffscreenDocument(
 }
 
 export async function requestMlClassification(
-  context: ClassificationContext,
+  context: MlClassifyRequest,
   appendDebugLog: (entry: DebugLogEntry) => Promise<void> | void,
-): Promise<MlClassificationResult> {
-  // The background consumes a stable `ready` vs `fallback` ML contract without
-  // depending on the specific offscreen inference runtime details.
+): Promise<MlClassifyResponse> {
   await ensureOffscreenDocument(appendDebugLog);
   const startedAt = Date.now();
 
-  const message: MlClassifyRequest & { type: 'ML_CLASSIFY_REQUEST' } = {
-    goal: context.goal,
-    pageSignals: context.pageSignals,
-    requestId: context.requestId,
-    title: context.title,
+  const message: MlClassifyRequestMessage = {
+    ...context,
     type: 'ML_CLASSIFY_REQUEST',
-    url: context.url,
   };
 
   let rawResponse: unknown;
@@ -229,7 +192,7 @@ export async function requestMlClassification(
     throw error;
   }
 
-  if (!isMlClassificationResult(rawResponse)) {
+  if (!isMlClassificationResponse(rawResponse)) {
     const responseError = rawResponse === undefined
       ? 'Offscreen document returned no response.'
       : 'Offscreen document returned an invalid ML response.';
@@ -251,39 +214,38 @@ export async function requestMlClassification(
     throw new Error(responseError);
   }
 
-  const response = rawResponse as MlClassifyResponse;
-  const classification = response.modelState === 'ready' ? response.classification : undefined;
-  const error = response.modelState === 'fallback' ? response.error : undefined;
+  const classification = rawResponse.modelState === 'ready' ? rawResponse.classification : undefined;
+  const error = rawResponse.modelState === 'fallback' ? rawResponse.error : undefined;
 
   await appendDebugLog(
     createDebugEntry('classification-complete', {
-      backend: response.backend,
-      cacheHit: response.cacheHit,
+      backend: rawResponse.backend,
+      cacheHit: rawResponse.cacheHit,
       metadata: {
         classification: classification ?? 'fallback',
         classificationRequestDurationMs: Date.now() - startedAt,
-        modelState: response.modelState,
+        modelState: rawResponse.modelState,
         usedPageSignals: Boolean(context.pageSignals),
       },
       error,
       requestId: context.requestId,
-      score: response.score,
+      score: rawResponse.score,
       tabId: context.tabId,
     }),
   );
 
   log('classification-complete', {
-    backend: response.backend,
-    cacheHit: response.cacheHit,
+    backend: rawResponse.backend,
+    cacheHit: rawResponse.cacheHit,
     classification,
     error,
-    modelState: response.modelState,
+    modelState: rawResponse.modelState,
     requestId: context.requestId,
-    score: response.score,
+    score: rawResponse.score,
     tabId: context.tabId,
   });
 
-  return response;
+  return rawResponse;
 }
 
 export function configureOffscreenClientForTesting(overrides: OffscreenClientTestOverrides): void {

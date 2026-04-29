@@ -1,5 +1,6 @@
-import type { PageSignals, SignalSnapshot } from '../types';
-import { extractHostnameTokens, normalizeText } from './ml-helpers';
+import type { PageSignals } from '../types';
+import { normalizeText } from './ml-helpers';
+import { safeParseUrl } from './session-utilities';
 
 const MAX_HEADINGS = 6;
 const MAX_SECTION_HINTS = 6;
@@ -177,6 +178,10 @@ function appendStructuredTypeValue(rawValue: unknown, values: string[]): void {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
 function collectJsonLdStructuredTypes(node: unknown, values: string[]): void {
   if (values.length >= MAX_STRUCTURED_TYPES || node === null || node === undefined) {
     return;
@@ -192,13 +197,12 @@ function collectJsonLdStructuredTypes(node: unknown, values: string[]): void {
     return;
   }
 
-  if (typeof node !== 'object') {
+  if (!isRecord(node)) {
     return;
   }
 
-  const record = node as Record<string, unknown>;
-  appendStructuredTypeValue(record['@type'], values);
-  collectJsonLdStructuredTypes(record['@graph'], values);
+  appendStructuredTypeValue(node['@type'], values);
+  collectJsonLdStructuredTypes(node['@graph'], values);
 }
 
 function extractStructuredTypes(documentRef: QueryableDocument): string[] {
@@ -289,50 +293,51 @@ function extractMainTextSnippets(documentRef: QueryableDocument): string[] {
 }
 
 function extractPathnameTokens(url: string): string[] {
-  try {
-    const pathname = new URL(url).pathname.toLowerCase();
+  const parsedUrl = safeParseUrl(url);
 
-    return dedupeStrings(
-      pathname
-        .split(/[^a-z0-9]+/g)
-        .map((token) => token.trim())
-        .filter((token) => token.length > 2),
-      MAX_PATHNAME_TOKENS,
-    );
-  } catch {
+  if (!parsedUrl) {
     return [];
   }
+
+  return dedupeStrings(
+    parsedUrl.pathname
+      .toLowerCase()
+      .split(/[^a-z0-9]+/g)
+      .map((token) => token.trim())
+      .filter((token) => token.length > 2),
+    MAX_PATHNAME_TOKENS,
+  );
 }
 
 function detectPageMarkers(documentRef: QueryableDocument, url: string): string[] {
   const markers: string[] = [];
+  const parsedUrl = safeParseUrl(url);
 
-  try {
-    const parsed = new URL(url);
-    const hostname = parsed.hostname.toLowerCase();
-    const pathname = parsed.pathname.toLowerCase();
-
-    if (pathname.includes('/watch') || pathname.includes('/video') || pathname.includes('/shorts')) {
-      markers.push('video-page');
-    }
-
-    if (pathname.includes('/feed') || pathname.includes('/explore') || pathname === '/home') {
-      markers.push('feed-page');
-    }
-
-    if (pathname.includes('/pull/') || pathname.includes('/issues/') || hostname.includes('github.com')) {
-      markers.push('repository-page');
-    }
-
-    if (hostname.includes('docs.') || hostname.includes('notion.') || pathname.includes('/doc')) {
-      markers.push('document-page');
-    }
-
-    if (pathname.includes('/chat') || pathname.includes('/messages')) {
-      markers.push('chat-page');
-    }
-  } catch {
+  if (!parsedUrl) {
     return [];
+  }
+
+  const hostname = parsedUrl.hostname.toLowerCase();
+  const pathname = parsedUrl.pathname.toLowerCase();
+
+  if (pathname.includes('/watch') || pathname.includes('/video') || pathname.includes('/shorts')) {
+    markers.push('video-page');
+  }
+
+  if (pathname.includes('/feed') || pathname.includes('/explore') || pathname === '/home') {
+    markers.push('feed-page');
+  }
+
+  if (pathname.includes('/pull/') || pathname.includes('/issues/') || hostname.includes('github.com')) {
+    markers.push('repository-page');
+  }
+
+  if (hostname.includes('docs.') || hostname.includes('notion.') || pathname.includes('/doc')) {
+    markers.push('document-page');
+  }
+
+  if (pathname.includes('/chat') || pathname.includes('/messages')) {
+    markers.push('chat-page');
   }
 
   for (const [marker, selector] of Object.entries(APP_MARKER_SELECTORS)) {
@@ -342,18 +347,6 @@ function detectPageMarkers(documentRef: QueryableDocument, url: string): string[
   }
 
   return dedupeStrings(markers, MAX_HEADINGS);
-}
-
-function buildLabeledSection(label: string, values: string[] | string | undefined): string {
-  const normalizedValues = Array.isArray(values)
-    ? values.map((value) => normalizeText(value)).filter(Boolean)
-    : [normalizeText(values ?? '')].filter(Boolean);
-
-  if (normalizedValues.length === 0) {
-    return '';
-  }
-
-  return `${label} ${normalizedValues.join(' ')}`.trim();
 }
 
 export function extractPageSignalsFromDocument(
@@ -394,51 +387,5 @@ export function extractPageSignalsFromDocument(
     },
     structuredTypes,
     title,
-  };
-}
-
-export function hasMeaningfulPageSignals(signals: PageSignals): boolean {
-  return Boolean(
-    signals.metaDescription ||
-      signals.structuredTypes.length > 0 ||
-      signals.sectionHints.length > 0 ||
-      signals.headings.length > 0 ||
-      signals.mainTextSnippets.length > 0 ||
-      signals.pageMarkers.length > 0 ||
-      signals.pathnameTokens.length > 0,
-  );
-}
-
-export function buildNormalizedPageContext(input: {
-  pageSignals?: PageSignals;
-  title: string;
-  url: string;
-}): string {
-  const baseTitle = normalizeText(sanitizeText(input.pageSignals?.title ?? input.title, MAX_TEXT_LENGTH));
-  const sections = [
-    baseTitle,
-    normalizeText(input.pageSignals?.metaDescription ?? ''),
-    buildLabeledSection('type', input.pageSignals?.structuredTypes),
-    buildLabeledSection('section', input.pageSignals?.sectionHints),
-    buildLabeledSection('headings', input.pageSignals?.headings),
-    buildLabeledSection('main', input.pageSignals?.mainTextSnippets),
-    buildLabeledSection('markers', input.pageSignals?.pageMarkers),
-    buildLabeledSection('path', input.pageSignals?.pathnameTokens),
-    normalizeText(extractHostnameTokens(input.url).join(' ')),
-  ].filter(Boolean);
-
-  return dedupeStrings(sections, sections.length).join('. ').trim();
-}
-
-export function createSignalSnapshot(signals: PageSignals): SignalSnapshot {
-  return {
-    headings: signals.headings,
-    mainTextSnippets: signals.mainTextSnippets,
-    metaDescription: signals.metaDescription,
-    pageMarkers: signals.pageMarkers,
-    pathnameTokens: signals.pathnameTokens,
-    sectionHints: signals.sectionHints,
-    structuredTypes: signals.structuredTypes,
-    title: signals.title,
   };
 }

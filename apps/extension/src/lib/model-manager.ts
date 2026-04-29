@@ -1,53 +1,16 @@
-import type { Classification, PageSignals } from '../types';
+import type { FeatureExtractionPipelineOptions, FeatureExtractionPipelineType, Tensor } from '@huggingface/transformers';
+import type { DebugLogEntry, MlClassifyRequest, MlClassifyResponse } from '../types';
 import { classifyCosineScore, cosineSimilarity, normalizeText } from './ml-helpers';
-import { buildNormalizedPageContext } from './page-signals';
-
-type EmbeddingOutput = { data: Float32Array };
-type EmbeddingPipeline = (text: string, options?: Record<string, unknown>) => Promise<EmbeddingOutput>;
+import { buildNormalizedPageContext } from './page-context';
 
 const MODEL_DIRECTORY = 'assets/models/minilm';
-// `config.json` is a lightweight sentinel that proves the packaged model exists
-// without eagerly fetching the heavier ONNX weight file. The path must include
-// the HuggingFace model ID subdirectory because the build nests files there to
-// match the library's local path resolution: {localModelPath}/{modelId}/{file}.
 const MODEL_CONFIG_PATH = `${MODEL_DIRECTORY}/Xenova/all-MiniLM-L6-v2/config.json`;
 const ORT_ASSET_DIRECTORY = 'assets';
 const ORT_WASM_MODULE_PATH = `${ORT_ASSET_DIRECTORY}/ort-wasm-simd-threaded.jsep.mjs`;
 const ORT_WASM_BINARY_PATH = `${ORT_ASSET_DIRECTORY}/ort-wasm-simd-threaded.jsep.wasm`;
-// The response contract still exposes `backend` for background compatibility,
-// even though the packaged extension runtime is WASM-only today.
 const BACKEND_NAME = 'wasm';
 
-type ModelManagerTestOverrides = {
-  createPipeline?: () => Promise<EmbeddingPipeline>;
-  verifyAssetExists?: typeof verifyAssetExists;
-};
-
-export type MlClassifyRequest = {
-  goal: string;
-  pageSignals?: PageSignals;
-  requestId: string;
-  title: string;
-  url: string;
-};
-
-export type MlClassifyResponse =
-  | {
-      backend: string;
-      cacheHit: boolean;
-      classification: Classification;
-      modelState: 'ready';
-      score: number;
-    }
-  | {
-      backend: string;
-      cacheHit: false;
-      error: string;
-      modelState: 'fallback';
-      score: null;
-    };
-
-export type MlDebugEventStatus =
+type MlDebugEventStatus =
   | 'cache-hit'
   | 'cache-miss'
   | 'classification-complete'
@@ -57,22 +20,40 @@ export type MlDebugEventStatus =
   | 'offscreen-closed'
   | 'offscreen-created';
 
-export type MlDebugEvent = {
-  backend?: string;
-  cacheHit?: boolean;
-  error?: string;
-  metadata?: Record<string, string | number | boolean | null>;
-  requestId?: string;
-  score?: number | null;
-  source: 'bg' | 'offscreen';
-  status: MlDebugEventStatus;
-  tabId?: number;
-  timestamp: number;
+type ModelManagerTestOverrides = {
+  createPipeline?: () => Promise<FeatureExtractionPipelineType>;
+  verifyAssetExists?: typeof verifyAssetExists;
 };
 
-let pipelinePromise: Promise<EmbeddingPipeline> | null = null;
-// Goal and page embeddings stay in the offscreen document so the background worker
-// never owns ML state directly. They are cleared on explicit runtime teardown.
+type TransformersEnv = {
+  allowLocalModels: boolean;
+  allowRemoteModels: boolean;
+  backends?: {
+    onnx?: {
+      wasm?: {
+        wasmPaths?: {
+          mjs: string;
+          wasm: string;
+        };
+      };
+    };
+  };
+  localModelPath: string;
+  useBrowserCache: boolean;
+};
+
+type TransformersModule = {
+  env: TransformersEnv;
+  pipeline: (
+    task: 'feature-extraction',
+    model: string,
+    options: {
+      local_files_only: true;
+    },
+  ) => Promise<FeatureExtractionPipelineType>;
+};
+
+let pipelinePromise: Promise<FeatureExtractionPipelineType> | null = null;
 const goalEmbeddingCache = new Map<string, number[]>();
 const pageEmbeddingCache = new Map<string, number[]>();
 let testOverrides: ModelManagerTestOverrides = {};
@@ -83,8 +64,8 @@ function toRuntimeUrl(path: string): string {
 
 function createDebugEvent(
   status: MlDebugEventStatus,
-  partial: Omit<MlDebugEvent, 'source' | 'status' | 'timestamp'> = {},
-): MlDebugEvent {
+  partial: Omit<DebugLogEntry, 'source' | 'status' | 'timestamp'> = {},
+): DebugLogEntry {
   return {
     ...partial,
     source: 'offscreen',
@@ -122,16 +103,13 @@ async function ensureRuntimeAssetsExist(): Promise<void> {
   await ensureAssetExists(ORT_WASM_BINARY_PATH);
 }
 
-async function createLocalPipeline(): Promise<EmbeddingPipeline> {
-  // Dynamic import: @huggingface/transformers is ESM-only; dynamic import
-  // keeps the CJS test build working (tests inject createPipeline overrides).
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const hf: any = await import('@huggingface/transformers');
+async function createLocalPipeline(): Promise<FeatureExtractionPipelineType> {
+  const hf = await import('@huggingface/transformers') as unknown as TransformersModule;
 
   hf.env.allowRemoteModels = false;
   hf.env.allowLocalModels = true;
   hf.env.useBrowserCache = false;
-  hf.env.localModelPath = toRuntimeUrl(MODEL_DIRECTORY) + '/';
+  hf.env.localModelPath = `${toRuntimeUrl(MODEL_DIRECTORY)}/`;
 
   if (hf.env.backends?.onnx?.wasm) {
     hf.env.backends.onnx.wasm.wasmPaths = {
@@ -140,15 +118,14 @@ async function createLocalPipeline(): Promise<EmbeddingPipeline> {
     };
   }
 
-  const pipe = await hf.pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
+  return hf.pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
     local_files_only: true,
   });
-  return pipe as EmbeddingPipeline;
 }
 
 async function loadModel(
-  notifyDebug?: (event: MlDebugEvent) => void,
-): Promise<EmbeddingPipeline> {
+  notifyDebug?: (event: DebugLogEntry) => void,
+): Promise<FeatureExtractionPipelineType> {
   notifyDebug?.(createDebugEvent('model-loading', { backend: BACKEND_NAME }));
   const startedAt = Date.now();
 
@@ -170,8 +147,8 @@ async function loadModel(
 }
 
 async function getModel(
-  notifyDebug?: (event: MlDebugEvent) => void,
-): Promise<EmbeddingPipeline> {
+  notifyDebug?: (event: DebugLogEntry) => void,
+): Promise<FeatureExtractionPipelineType> {
   if (!pipelinePromise) {
     pipelinePromise = loadModel(notifyDebug).catch((error) => {
       pipelinePromise = null;
@@ -187,7 +164,7 @@ async function getCachedEmbedding(
   key: string,
   text: string,
   cacheName: 'goal' | 'page',
-  notifyDebug?: (event: MlDebugEvent) => void,
+  notifyDebug?: (event: DebugLogEntry) => void,
   requestId?: string,
 ): Promise<{ cacheHit: boolean; embedding: number[] }> {
   const cached = cache.get(key);
@@ -212,8 +189,11 @@ async function getCachedEmbedding(
   );
 
   const pipe = await getModel(notifyDebug);
-  const output = await pipe(text, { pooling: 'mean', normalize: true });
-  const embedding = Array.from(output.data);
+  const output = await pipe(text, {
+    normalize: true,
+    pooling: 'mean',
+  } satisfies FeatureExtractionPipelineOptions);
+  const embedding = Array.from((output as Tensor).data);
 
   if (embedding.length === 0) {
     throw new Error(`No embedding returned for key: ${key}`);
@@ -225,7 +205,7 @@ async function getCachedEmbedding(
 
 export async function classifyWithModel(
   request: MlClassifyRequest,
-  notifyDebug?: (event: MlDebugEvent) => void,
+  notifyDebug?: (event: DebugLogEntry) => void,
 ): Promise<MlClassifyResponse> {
   const startedAt = Date.now();
 
@@ -322,8 +302,6 @@ export function configureModelManagerForTesting(overrides: ModelManagerTestOverr
 }
 
 export function clearModelCaches(): void {
-  // Clearing both caches keeps the offscreen model lifetime explicit while
-  // leaving the background-facing ML contract unchanged.
   goalEmbeddingCache.clear();
   pageEmbeddingCache.clear();
 }

@@ -2,11 +2,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  extractPageSignalsFromDocument,
+} = require('../.test-build/lib/page-signals.js');
+const {
   buildNormalizedPageContext,
   createSignalSnapshot,
-  extractPageSignalsFromDocument,
   hasMeaningfulPageSignals,
-} = require('../.test-build/lib/page-signals.js');
+} = require('../.test-build/lib/page-context.js');
 
 function createElement({ attributes = {}, content, hidden = false, innerText, multi = {}, textContent = '' } = {}) {
   return {

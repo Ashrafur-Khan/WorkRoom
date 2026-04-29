@@ -1,10 +1,7 @@
-/* src/popup/popup.css */
-
-/* Force the popup to be a specific size */
 html, body {
-  width: 320px; /* Standard width for extensions */
+  width: 320px;
   height: fit-content;
-  min-height: 300px; /* Ensure enough vertical space */
+  min-height: 300px;
   margin: 0;
   padding: 0;
   box-sizing: border-box;
@@ -17,23 +14,20 @@ body {
   color: #333;
 }
 
-/* Utility for hiding views */
 .hidden {
   display: none !important;
 }
 
-/* Inputs */
 textarea, input {
   width: 100%;
   margin-bottom: 12px;
   padding: 8px;
   border: 1px solid #ccc;
   border-radius: 4px;
-  box-sizing: border-box; /* Keeps padding inside the width */
+  box-sizing: border-box;
   font-family: inherit;
 }
 
-/* Labels */
 label {
   display: block;
   margin-bottom: 4px;
@@ -41,11 +35,10 @@ label {
   font-size: 12px;
 }
 
-/* Buttons */
 button {
   width: 100%;
   padding: 10px;
-  background-color: #007AFF; /* System Blue */
+  background-color: #007AFF;
   color: white;
   border: none;
   border-radius: 6px;
@@ -63,7 +56,6 @@ button:hover:not(:disabled) {
   background-color: #0062cc;
 }
 
-/* Text Styles */
 h1 {
   font-size: 18px;
   margin-top: 0;

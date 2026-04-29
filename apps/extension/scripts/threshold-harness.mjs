@@ -13,15 +13,9 @@
  */
 
 import { createRequire } from 'node:module';
-import { dirname, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+import { compileExtensionTests, extensionRoot, testBuildRoot } from './common.mjs';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const extensionRoot = resolve(__dirname, '..');
-const repoRoot = resolve(extensionRoot, '..', '..');
-const testBuild = resolve(extensionRoot, '.test-build');
 const [, , pairSourceArg, pairExportArg] = process.argv;
 const pairSource = pairSourceArg ?? 'src/__tests__/threshold-pairs.ts';
 const pairExport = pairExportArg ?? 'THRESHOLD_PAIRS';
@@ -34,23 +28,13 @@ function toCompiledPairModulePath(sourcePath) {
   if (!relativeSource.startsWith('src/')) {
     throw new Error(`Pair source must be under apps/extension/src; got "${sourcePath}"`);
   }
-  return resolve(testBuild, relativeSource.slice('src/'.length).replace(/\.ts$/, '.js'));
+  return resolve(testBuildRoot, relativeSource.slice('src/'.length).replace(/\.ts$/, '.js'));
 }
 
-// ── Step 0: Compile TypeScript ─────────────────────────────────
 console.log('Compiling TypeScript...');
 const require_ = createRequire(import.meta.url);
-const tscBin = require_.resolve('typescript/lib/tsc.js');
-const tscResult = spawnSync(process.execPath, [tscBin, '-p', resolve(extensionRoot, 'tsconfig.tests.json')], {
-  cwd: repoRoot,
-  stdio: 'inherit',
-});
-if (tscResult.status !== 0) {
-  console.error('TypeScript compilation failed.');
-  process.exit(1);
-}
+compileExtensionTests();
 
-// ── Step 1: Load compiled modules via CJS interop ──────────────
 const pairModulePath = toCompiledPairModulePath(pairSource);
 const pairModule = require_(pairModulePath);
 const THRESHOLD_PAIRS = pairModule[pairExport];
@@ -58,19 +42,17 @@ if (!Array.isArray(THRESHOLD_PAIRS)) {
   throw new Error(`Export "${pairExport}" was not found or is not an array in ${pairSource}`);
 }
 const { normalizeText, cosineSimilarity, classifyCosineScore, ML_THRESHOLDS, ML_BORDERLINE_WINDOW } = require_(
-  resolve(testBuild, 'lib/ml-helpers.js'),
+  resolve(testBuildRoot, 'lib/ml-helpers.js'),
 );
-const { buildNormalizedPageContext } = require_(resolve(testBuild, 'lib/page-signals.js'));
+const { buildNormalizedPageContext } = require_(resolve(testBuildRoot, 'lib/page-context.js'));
 
 console.log(`Using pair source: ${pairSource} (${pairExport}, ${THRESHOLD_PAIRS.length} pairs)`);
 
-// ── Step 2: Load MiniLM-L6-v2 pipeline ─────────────────────────
 console.log('Loading MiniLM-L6-v2 model (first run downloads ~23MB)...');
 const { pipeline } = await import('@huggingface/transformers');
 const pipe = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
 console.log('Model loaded.\n');
 
-// ── Step 3: Score every pair ───────────────────────────────────
 async function embed(text) {
   const output = await pipe(text, { pooling: 'mean', normalize: true });
   return Array.from(output.data);
@@ -101,7 +83,6 @@ for (const pair of THRESHOLD_PAIRS) {
   });
 }
 
-// ── Step 4: Output formatted table ─────────────────────────────
 function truncate(str, len) {
   return str.length > len ? str.slice(0, len - 1) + '…' : str;
 }
@@ -138,7 +119,6 @@ for (const r of results) {
 
 console.log('═'.repeat(130));
 
-// ── Step 5: Per-label statistics ───────────────────────────────
 function stats(scores) {
   if (scores.length === 0) return { min: NaN, max: NaN, mean: NaN, median: NaN };
   const sorted = [...scores].sort((a, b) => a - b);
@@ -168,7 +148,6 @@ for (const [label, scores] of Object.entries(groups)) {
   );
 }
 
-// ── Step 6: Misclassification analysis ─────────────────────────
 console.log(`\nCurrent thresholds: onTask=${ML_THRESHOLDS.onTask}  offTask=${ML_THRESHOLDS.offTask}  borderlineWindow=${ML_BORDERLINE_WINDOW}`);
 
 const misclassified = results.filter((r) => !isCorrect(r.expectedLabel, r.currentClassification));
@@ -190,7 +169,6 @@ if (misclassified.length > 0) {
   }
 }
 
-// ── Step 7: Threshold suggestions ──────────────────────────────
 console.log('\n' + '═'.repeat(70));
 console.log('Threshold suggestion analysis');
 console.log('─'.repeat(70));
@@ -208,17 +186,14 @@ console.log(`  on-task scores range:    [${onTaskMin.toFixed(4)} .. ${Math.max(.
 console.log(`  off-task scores range:   [${Math.min(...offTaskScores).toFixed(4)} .. ${offTaskMax.toFixed(4)}]`);
 console.log(`  borderline scores range: [${borderlineMin.toFixed(4)} .. ${borderlineMax.toFixed(4)}]`);
 
-// Suggest onTask threshold: midpoint between borderlineMax and onTaskMin
 const suggestedOnTask = !isNaN(borderlineMax)
   ? Number(((borderlineMax + onTaskMin) / 2).toFixed(2))
   : Number(((offTaskMax + onTaskMin) / 2).toFixed(2));
 
-// Suggest offTask threshold: midpoint between offTaskMax and borderlineMin
 const suggestedOffTask = !isNaN(borderlineMin)
   ? Number(((offTaskMax + borderlineMin) / 2).toFixed(2))
   : Number(((offTaskMax + onTaskMin) / 2).toFixed(2));
 
-// Borderline window: half the ambiguous band, min 0.03
 const ambiguousBandWidth = suggestedOnTask - suggestedOffTask;
 const suggestedWindow = Math.max(0.03, Number((ambiguousBandWidth / 4).toFixed(2)));
 
@@ -227,7 +202,6 @@ console.log(`    onTask:          ${suggestedOnTask}`);
 console.log(`    offTask:         ${suggestedOffTask}`);
 console.log(`    borderlineWindow: ${suggestedWindow}`);
 
-// Rerun classification with suggested thresholds
 function classifyWithThresholds(score, onTask, offTask) {
   if (score >= onTask) return 'on-task';
   if (score <= offTask) return 'off-task';
@@ -251,12 +225,10 @@ if (suggestedMisses.length > 0) {
   }
 }
 
-// ── Step 8: Surprising scores ──────────────────────────────────
 console.log('\n' + '═'.repeat(70));
 console.log('Surprising scores (>0.15 deviation from expected band center):');
 console.log('─'.repeat(70));
 
-// Expected band centers: on-task ~0.7, off-task ~0.2, borderline ~0.45
 const bandCenters = { 'on-task': 0.7, 'off-task': 0.2, borderline: 0.45 };
 const surpriseThreshold = 0.15;
 

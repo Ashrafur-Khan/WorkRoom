@@ -1,6 +1,15 @@
 import './styles.css';
-import type { ExtractPageSignalsResponse } from '../types';
 import { extractPageSignalsFromDocument } from '../lib/page-signals';
+import type {
+  AllowDomainForSessionMessage,
+  BlockPageMessage,
+  ExtractPageSignalsResponse,
+  RuntimeMessage,
+  SessionCompleteMessage,
+  SessionMutationResponse,
+  SnoozeDomainMessage,
+  UnblockPageMessage,
+} from '../types';
 
 const OVERLAY_ID = 'workroom-overlay-id';
 const GOAL_COPY_ID = 'workroom-goal-copy';
@@ -9,22 +18,52 @@ const SNOOZE_COOLDOWN_SECONDS = 10;
 
 let cooldownIntervalId: ReturnType<typeof setInterval> | null = null;
 
+function isRuntimeMessage(value: unknown): value is RuntimeMessage {
+  return typeof value === 'object' && value !== null && typeof (value as { type?: unknown }).type === 'string';
+}
+
+function isSessionMutationResponse(value: unknown): value is SessionMutationResponse {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { ok?: unknown }).ok === 'boolean'
+  );
+}
+
+function isBlockPageMessage(message: RuntimeMessage): message is BlockPageMessage {
+  return message.type === 'BLOCK_PAGE';
+}
+
+function isSessionCompleteMessage(message: RuntimeMessage): message is SessionCompleteMessage {
+  return message.type === 'SESSION_COMPLETE';
+}
+
+function isUnblockPageMessage(message: RuntimeMessage): message is UnblockPageMessage {
+  return message.type === 'UNBLOCK_PAGE';
+}
+
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+  if (!isRuntimeMessage(request)) {
+    return false;
+  }
+
   if (request.type === 'EXTRACT_PAGE_SIGNALS') {
     sendResponse(extractCurrentPageSignals());
     return true;
   }
 
-  if (request.type === 'SESSION_COMPLETE') {
+  if (isSessionCompleteMessage(request)) {
     removeBlockScreen();
     showNotification(request.payload.message);
+    return false;
   }
 
-  if (request.type === 'BLOCK_PAGE') {
+  if (isBlockPageMessage(request)) {
     showBlockScreen(request.payload.goal);
+    return false;
   }
 
-  if (request.type === 'UNBLOCK_PAGE') {
+  if (isUnblockPageMessage(request)) {
     removeBlockScreen();
   }
 
@@ -33,7 +72,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
 console.info('[WorkRoom:content] Listener ready.', { url: window.location.href });
 
-export function extractCurrentPageSignals(): ExtractPageSignalsResponse {
+function extractCurrentPageSignals(): ExtractPageSignalsResponse {
   try {
     return {
       ok: true,
@@ -47,7 +86,7 @@ export function extractCurrentPageSignals(): ExtractPageSignalsResponse {
   }
 }
 
-function showNotification(text: string) {
+function showNotification(text: string): void {
   const container = document.createElement('div');
   container.className = 'workroom-toast';
 
@@ -63,7 +102,7 @@ function showNotification(text: string) {
   }, 5000);
 }
 
-function showBlockScreen(goal: string) {
+function showBlockScreen(goal: string): void {
   const existingOverlay = document.getElementById(OVERLAY_ID);
 
   if (existingOverlay) {
@@ -143,7 +182,7 @@ function showBlockScreen(goal: string) {
   document.body.style.overflow = 'hidden';
 }
 
-function removeBlockScreen() {
+function removeBlockScreen(): void {
   if (cooldownIntervalId !== null) {
     clearInterval(cooldownIntervalId);
     cooldownIntervalId = null;
@@ -164,12 +203,16 @@ function cancelCooldown(): void {
     clearInterval(cooldownIntervalId);
     cooldownIntervalId = null;
   }
+
   history.back();
 }
 
 function showCooldownScreen(durationMinutes: number): void {
   const overlay = document.getElementById(OVERLAY_ID);
-  if (!overlay) return;
+
+  if (!overlay) {
+    return;
+  }
 
   overlay.innerHTML = '';
 
@@ -198,20 +241,28 @@ function showCooldownScreen(durationMinutes: number): void {
 
   let secondsLeft = SNOOZE_COOLDOWN_SECONDS;
   cooldownIntervalId = setInterval(() => {
-    secondsLeft--;
+    secondsLeft -= 1;
     digits.textContent = String(secondsLeft);
+
     if (secondsLeft <= 0) {
-      clearInterval(cooldownIntervalId!);
-      cooldownIntervalId = null;
+      const intervalId = cooldownIntervalId;
+
+      if (intervalId !== null) {
+        clearInterval(intervalId);
+        cooldownIntervalId = null;
+      }
+
       void snoozeDomain(durationMinutes);
     }
   }, 1000);
 }
 
 async function allowDomainForSession(): Promise<void> {
-  const response = await chrome.runtime.sendMessage({ type: 'ALLOW_DOMAIN_FOR_SESSION' });
+  const response = await chrome.runtime.sendMessage<AllowDomainForSessionMessage, unknown>({
+    type: 'ALLOW_DOMAIN_FOR_SESSION',
+  });
 
-  if (response?.ok) {
+  if (isSessionMutationResponse(response) && response.ok) {
     removeBlockScreen();
     return;
   }
@@ -220,12 +271,12 @@ async function allowDomainForSession(): Promise<void> {
 }
 
 async function snoozeDomain(durationMinutes: number): Promise<void> {
-  const response = await chrome.runtime.sendMessage({
+  const response = await chrome.runtime.sendMessage<SnoozeDomainMessage, unknown>({
     payload: { durationMinutes },
     type: 'SNOOZE_DOMAIN',
   });
 
-  if (response?.ok) {
+  if (isSessionMutationResponse(response) && response.ok) {
     removeBlockScreen();
     return;
   }
