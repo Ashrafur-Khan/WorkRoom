@@ -29,6 +29,7 @@ const { runSecurityCheckForState } = require('../.test-build/background/security
 function createRunningState() {
   return {
     allowedDomains: [],
+    allowedSearchQueries: [],
     isRunning: true,
     goal: 'Ship WorkRoom',
     snoozedDomains: {},
@@ -565,6 +566,198 @@ test('runSecurityCheckForState expires snoozes and falls back to classification'
   assert.deepEqual(calls.badgeColor, [{ color: '#00FF00', tabId: 19 }]);
   assert.equal(calls.debugEntries[0]?.status, 'snooze-expired');
   assert.equal(calls.debugEntries.at(-1)?.status, 'classification-complete');
+});
+
+test('runSecurityCheckForState treats matching SERP queries as on-task overrides', async () => {
+  const calls = {
+    badgeColor: [],
+    badgeText: [],
+    classifyCalls: 0,
+    debugEntries: [],
+  };
+
+  await runSecurityCheckForState(
+    20,
+    'https://www.google.com/search?q=react%20hooks&hl=en',
+    'react hooks - Google Search',
+    {
+      ...createRunningState(),
+      allowedSearchQueries: [{ host: 'www.google.com', query: 'react hooks' }],
+    },
+    {
+      appendDebugLog: async (entry) => {
+        calls.debugEntries.push(entry);
+      },
+      classify: async () => {
+        calls.classifyCalls += 1;
+        return { classification: 'off-task', score: 0.1, source: 'ml', usedPageSignals: false };
+      },
+      requestMlClassification: async () => {
+        throw new Error('requestMlClassification should not be called');
+      },
+      actionApi: {
+        setBadgeText(details) {
+          calls.badgeText.push(details);
+        },
+        setBadgeBackgroundColor(details) {
+          calls.badgeColor.push(details);
+        },
+      },
+      tabsApi: {
+        async get() {
+          throw new Error('get should not be called');
+        },
+        async sendMessage() {
+          throw new Error('sendMessage should not be called');
+        },
+        async query() {
+          return [];
+        },
+      },
+      scriptingApi: {
+        async executeScript() {
+          throw new Error('executeScript should not be called');
+        },
+        async insertCSS() {
+          throw new Error('insertCSS should not be called');
+        },
+      },
+      storageApi: {
+        async set() {
+          throw new Error('storageApi.set should not be called');
+        },
+      },
+    },
+  );
+
+  assert.equal(calls.classifyCalls, 0);
+  assert.deepEqual(calls.badgeText, [{ text: 'GOOD', tabId: 20 }]);
+  assert.deepEqual(calls.badgeColor, [{ color: '#00FF00', tabId: 20 }]);
+  assert.equal(calls.debugEntries.at(-1)?.status, 'override-applied');
+  assert.equal(calls.debugEntries.at(-1)?.metadata?.reason, 'user-allowed-search-query');
+  assert.equal(calls.debugEntries.at(-1)?.metadata?.host, 'www.google.com');
+  assert.equal(calls.debugEntries.at(-1)?.metadata?.query, 'react hooks');
+});
+
+test('runSecurityCheckForState does not leak SERP override to a different query', async () => {
+  const calls = {
+    classifyCalls: 0,
+    classifyArgs: [],
+    debugEntries: [],
+  };
+
+  await runSecurityCheckForState(
+    21,
+    'https://www.google.com/search?q=celebrity+gossip',
+    'celebrity gossip - Google Search',
+    {
+      ...createRunningState(),
+      allowedSearchQueries: [{ host: 'www.google.com', query: 'react hooks' }],
+    },
+    {
+      appendDebugLog: async (entry) => {
+        calls.debugEntries.push(entry);
+      },
+      classify: async (url, title, goal, context) => {
+        calls.classifyCalls += 1;
+        calls.classifyArgs.push({ url, title, goal, context });
+        return { classification: 'on-task', score: 0.9, source: 'ml', usedPageSignals: false };
+      },
+      requestMlClassification: async () => {
+        throw new Error('requestMlClassification should not be called');
+      },
+      actionApi: {
+        setBadgeText: noop,
+        setBadgeBackgroundColor: noop,
+      },
+      tabsApi: {
+        async get(tabId) {
+          return { id: tabId, url: 'https://www.google.com/search?q=celebrity+gossip' };
+        },
+        async sendMessage() {
+          return undefined;
+        },
+        async query() {
+          return [];
+        },
+      },
+      scriptingApi: {
+        async executeScript() {
+          return undefined;
+        },
+        async insertCSS() {
+          return undefined;
+        },
+      },
+      storageApi: {
+        async set() {
+          return undefined;
+        },
+      },
+    },
+  );
+
+  assert.equal(calls.classifyCalls, 1);
+  assert.equal(calls.classifyArgs[0].url, 'https://www.google.com/search?q=celebrity+gossip');
+});
+
+test('runSecurityCheckForState does not leak SERP override to a non-SERP path on the same host', async () => {
+  const calls = {
+    classifyCalls: 0,
+    debugEntries: [],
+  };
+
+  await runSecurityCheckForState(
+    22,
+    'https://www.google.com/maps',
+    'Google Maps',
+    {
+      ...createRunningState(),
+      allowedSearchQueries: [{ host: 'www.google.com', query: 'react hooks' }],
+    },
+    {
+      appendDebugLog: async (entry) => {
+        calls.debugEntries.push(entry);
+      },
+      classify: async () => {
+        calls.classifyCalls += 1;
+        return { classification: 'on-task', score: 0.9, source: 'ml', usedPageSignals: false };
+      },
+      requestMlClassification: async () => {
+        throw new Error('requestMlClassification should not be called');
+      },
+      actionApi: {
+        setBadgeText: noop,
+        setBadgeBackgroundColor: noop,
+      },
+      tabsApi: {
+        async get(tabId) {
+          return { id: tabId, url: 'https://www.google.com/maps' };
+        },
+        async sendMessage() {
+          return undefined;
+        },
+        async query() {
+          return [];
+        },
+      },
+      scriptingApi: {
+        async executeScript() {
+          return undefined;
+        },
+        async insertCSS() {
+          return undefined;
+        },
+      },
+      storageApi: {
+        async set() {
+          return undefined;
+        },
+      },
+    },
+  );
+
+  assert.equal(calls.classifyCalls, 1);
 });
 
 test('runSecurityCheckForState requests richer page signals for borderline classifications', async () => {

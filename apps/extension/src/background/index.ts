@@ -3,7 +3,9 @@ import { classifyUrl } from '../lib/classifier';
 import { requestMlClassification, closeOffscreenDocument } from '../lib/offscreen-client';
 import {
   allowDomainForSession,
+  allowSearchQueryForSession,
   createIdleState,
+  detectSearchEngineQuery,
   getDomainFromUrl,
   readSessionState,
   snoozeDomainForSession,
@@ -256,13 +258,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
+      const serp = isAllowDomainForSessionMessage(message)
+        ? detectSearchEngineQuery(senderUrl)
+        : null;
+
       const result = isAllowDomainForSessionMessage(message)
         ? await updateRunningSessionState((state) => {
+            if (serp) {
+              const { wasDuplicate } = allowSearchQueryForSession(state, serp);
+              const metadata: DebugMetadata = {
+                host: serp.host,
+                query: serp.query,
+                scope: 'session',
+                wasDuplicate,
+              };
+              return { debugStatus: 'user-marked-allowed-search-query', metadata };
+            }
+
             const { wasDuplicate } = allowDomainForSession(state, domain);
-            return {
-              debugStatus: 'user-marked-allowed-domain',
-              metadata: { domain, scope: 'session', wasDuplicate },
-            };
+            const metadata: DebugMetadata = { domain, scope: 'session', wasDuplicate };
+            return { debugStatus: 'user-marked-allowed-domain', metadata };
           })
         : await updateRunningSessionState((state) => {
             const durationMinutes = Number(message.payload.durationMinutes);

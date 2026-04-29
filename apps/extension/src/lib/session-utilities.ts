@@ -1,4 +1,4 @@
-import type { RunningSessionState, SessionState } from '../types';
+import type { AllowedSearchQuery, RunningSessionState, SessionState } from '../types';
 
 type LocalStorageApi = Pick<typeof chrome.storage.local, 'get' | 'set'>;
 
@@ -6,6 +6,28 @@ type DomainOverrideStatus =
   | { status: 'allowed' }
   | { expiresAt: number; status: 'expired' | 'snoozed' }
   | { status: 'none' };
+
+export type SessionOverrideStatus =
+  | DomainOverrideStatus
+  | { status: 'allowed-search-query'; serp: AllowedSearchQuery };
+
+type SearchEngineConfig = {
+  host: string;
+  pathPrefix: string;
+  queryParam: string;
+};
+
+const SEARCH_ENGINES: SearchEngineConfig[] = [
+  { host: 'www.google.com',    pathPrefix: '/search',    queryParam: 'q' },
+  { host: 'google.com',        pathPrefix: '/search',    queryParam: 'q' },
+  { host: 'www.bing.com',      pathPrefix: '/search',    queryParam: 'q' },
+  { host: 'bing.com',          pathPrefix: '/search',    queryParam: 'q' },
+  { host: 'duckduckgo.com',    pathPrefix: '/',          queryParam: 'q' },
+  { host: 'search.brave.com',  pathPrefix: '/search',    queryParam: 'q' },
+  { host: 'www.startpage.com', pathPrefix: '/do/search', queryParam: 'query' },
+  { host: 'search.yahoo.com',  pathPrefix: '/search',    queryParam: 'p' },
+  { host: 'www.ecosia.org',    pathPrefix: '/search',    queryParam: 'q' },
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -35,6 +57,27 @@ function normalizeAllowedDomains(value: unknown): string[] {
   }
 
   return value.filter((domain): domain is string => typeof domain === 'string');
+}
+
+function normalizeAllowedSearchQueries(value: unknown): AllowedSearchQuery[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(
+    (entry): entry is AllowedSearchQuery =>
+      isRecord(entry) && typeof entry.host === 'string' && typeof entry.query === 'string',
+  );
+}
+
+function areAllowedSearchQueriesEqual(
+  left: AllowedSearchQuery[],
+  right: AllowedSearchQuery[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value.host === right[index].host && value.query === right[index].query)
+  );
 }
 
 function normalizeSnoozedDomains(value: unknown): Record<string, number> {
@@ -83,6 +126,7 @@ export function createRunningState(
 ): RunningSessionState {
   return {
     allowedDomains: [],
+    allowedSearchQueries: [],
     durationMinutes,
     goal,
     isRunning: true,
@@ -93,6 +137,46 @@ export function createRunningState(
 
 export function getDomainFromUrl(url: string): string | null {
   return safeParseUrl(url)?.hostname.toLowerCase() ?? null;
+}
+
+export function detectSearchEngineQuery(url: string): AllowedSearchQuery | null {
+  const parsed = safeParseUrl(url);
+
+  if (!parsed) {
+    return null;
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  const path = parsed.pathname;
+  const config = SEARCH_ENGINES.find((engine) => {
+    if (engine.host !== host) {
+      return false;
+    }
+
+    if (engine.pathPrefix === '/') {
+      return true;
+    }
+
+    return path === engine.pathPrefix || path.startsWith(`${engine.pathPrefix}/`);
+  });
+
+  if (!config) {
+    return null;
+  }
+
+  const rawQuery = parsed.searchParams.get(config.queryParam);
+
+  if (typeof rawQuery !== 'string') {
+    return null;
+  }
+
+  const query = rawQuery.trim().toLowerCase();
+
+  if (!query) {
+    return null;
+  }
+
+  return { host, query };
 }
 
 export function normalizeSessionState(raw: unknown): {
@@ -121,11 +205,14 @@ export function normalizeSessionState(raw: unknown): {
   }
 
   const rawAllowedDomains = raw.allowedDomains;
+  const rawAllowedSearchQueries = raw.allowedSearchQueries;
   const rawSnoozedDomains = raw.snoozedDomains;
   const allowedDomains = normalizeAllowedDomains(rawAllowedDomains);
+  const allowedSearchQueries = normalizeAllowedSearchQueries(rawAllowedSearchQueries);
   const snoozedDomains = normalizeSnoozedDomains(rawSnoozedDomains);
   const normalizedState: RunningSessionState = {
     allowedDomains,
+    allowedSearchQueries,
     durationMinutes: raw.durationMinutes,
     goal: raw.goal,
     isRunning: true,
@@ -137,6 +224,9 @@ export function normalizeSessionState(raw: unknown): {
     !Array.isArray(rawAllowedDomains) ||
     allowedDomains.length !== rawAllowedDomains.length ||
     !areStringArraysEqual(allowedDomains, rawAllowedDomains.filter((value): value is string => typeof value === 'string')) ||
+    !Array.isArray(rawAllowedSearchQueries) ||
+    allowedSearchQueries.length !== rawAllowedSearchQueries.length ||
+    !areAllowedSearchQueriesEqual(allowedSearchQueries, normalizeAllowedSearchQueries(rawAllowedSearchQueries)) ||
     !isRecord(rawSnoozedDomains) ||
     Object.keys(snoozedDomains).length !== Object.keys(rawSnoozedDomains).length ||
     !areSnoozedDomainsEqual(snoozedDomains, normalizeSnoozedDomains(rawSnoozedDomains)) ||
@@ -186,6 +276,21 @@ export function allowDomainForSession(
   return { wasDuplicate };
 }
 
+export function allowSearchQueryForSession(
+  state: RunningSessionState,
+  serp: AllowedSearchQuery,
+): { wasDuplicate: boolean } {
+  const wasDuplicate = state.allowedSearchQueries.some(
+    (entry) => entry.host === serp.host && entry.query === serp.query,
+  );
+
+  if (!wasDuplicate) {
+    state.allowedSearchQueries.push(serp);
+  }
+
+  return { wasDuplicate };
+}
+
 export function snoozeDomainForSession(
   state: RunningSessionState,
   domain: string,
@@ -200,22 +305,38 @@ export function snoozeDomainForSession(
 
 export function resolveSessionOverride(
   state: RunningSessionState,
-  domain: string,
+  url: string,
   now = Date.now(),
-): DomainOverrideStatus {
-  if (state.allowedDomains.includes(domain)) {
+): SessionOverrideStatus {
+  const domain = getDomainFromUrl(url);
+
+  if (domain && state.allowedDomains.includes(domain)) {
     return { status: 'allowed' };
   }
 
-  const expiresAt = state.snoozedDomains[domain];
+  if (domain) {
+    const expiresAt = state.snoozedDomains[domain];
 
-  if (!expiresAt) {
-    return { status: 'none' };
+    if (expiresAt) {
+      if (expiresAt <= now) {
+        return { expiresAt, status: 'expired' };
+      }
+
+      return { expiresAt, status: 'snoozed' };
+    }
   }
 
-  if (expiresAt <= now) {
-    return { expiresAt, status: 'expired' };
+  const serp = detectSearchEngineQuery(url);
+
+  if (serp) {
+    const matched = state.allowedSearchQueries.find(
+      (entry) => entry.host === serp.host && entry.query === serp.query,
+    );
+
+    if (matched) {
+      return { serp: matched, status: 'allowed-search-query' };
+    }
   }
 
-  return { expiresAt, status: 'snoozed' };
+  return { status: 'none' };
 }

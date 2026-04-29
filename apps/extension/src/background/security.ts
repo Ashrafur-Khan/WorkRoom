@@ -496,7 +496,7 @@ async function resolveSessionOverride(
     return false;
   }
 
-  const override = resolveDomainOverride(state, domain);
+  const override = resolveDomainOverride(state, url);
 
   if (override.status === 'allowed') {
     await applyOverrideResult(dependencies, tabId, requestId, {
@@ -529,6 +529,16 @@ async function resolveSessionOverride(
       expiresAt: override.expiresAt,
       reason: 'domain-snoozed',
       scope: 'temporary',
+    });
+    return true;
+  }
+
+  if (override.status === 'allowed-search-query') {
+    await applyOverrideResult(dependencies, tabId, requestId, {
+      host: override.serp.host,
+      query: override.serp.query,
+      reason: 'user-allowed-search-query',
+      scope: 'session',
     });
     return true;
   }

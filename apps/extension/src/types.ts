@@ -43,8 +43,14 @@ export type SignalSnapshot = Pick<
   'headings' | 'mainTextSnippets' | 'metaDescription' | 'pageMarkers' | 'pathnameTokens' | 'sectionHints' | 'structuredTypes' | 'title'
 >;
 
+export type AllowedSearchQuery = {
+  host: string;
+  query: string;
+};
+
 export type RunningSessionState = {
   allowedDomains: string[];
+  allowedSearchQueries: AllowedSearchQuery[];
   durationMinutes: number;
   goal: string;
   isRunning: true;
